@@ -1,0 +1,47 @@
+
+name: Build Krokiet Classic for Windows
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'apply_classic_gui.py'
+      - '.github/workflows/build-krokiet-classic.yml'
+
+jobs:
+  windows-build:
+    runs-on: windows-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Check out wrapper repository
+        uses: actions/checkout@v4
+
+      - name: Clone upstream Czkawka
+        shell: pwsh
+        run: git clone --depth 1 https://github.com/qarmin/czkawka.git czkawka
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Apply classic layout
+        shell: pwsh
+        run: python apply_classic_gui.py czkawka
+
+      - name: Verify modified source
+        shell: pwsh
+        run: |
+          git -C czkawka diff --check
+          git -C czkawka diff --stat
+
+      - name: Build Windows executable
+        shell: pwsh
+        working-directory: czkawka
+        run: cargo build --release -p krokiet
+
+      - name: Upload executable
+        uses: actions/upload-artifact@v4
+        with:
+          name: krokiet-classic-windows
+          path: czkawka/target/release/krokiet.exe
+          if-no-files-found: error
