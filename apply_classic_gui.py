@@ -97,7 +97,7 @@ tree = once(tree, '''                border-radius: 5px;
                 height: item_height;
                 background: ColorPalette.get_listview_color_with_header(r.focused_row, touch-area.has-hover, r.header_row);''', '''                border-radius: 0px;
                 height: item_height;
-                background: r.header_row ? #dae5f0 : (r.focused_row ? #bed8f3 : (touch-area.has-hover ? #eaf3fb : (Math.mod(idx, 2) == 0 ? #ffffff : #f5f7f9)));''', 'table row styling')
+                background: r.header_row ? #384858 : (r.focused_row ? #315e87 : (touch-area.has-hover ? #344453 : (Math.mod(idx, 2) == 0 ? #272727 : #202020)));''', 'table row styling')
 
 # Atomic writes only after successful checks. Backups are in the checkout for easy rollback.
 for path, content in ((mw, main), (table, tree)):
@@ -108,5 +108,5 @@ for path, content in ((mw, main), (table, tree)):
 print('Applied conservative Classic Krokiet layout:')
 print(' - Original toolbar moved above results; callbacks unchanged')
 print(' - 70/30 results-to-preview split')
-print(' - Dense 21px table rows, compact headers and alternating row backgrounds')
+print(' - Dense 21px table rows, compact headers and high-contrast dark row backgrounds')
 print(' - Original source backups created with .before-classic suffix')
