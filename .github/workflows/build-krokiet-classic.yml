@@ -21,6 +21,20 @@ jobs:
         shell: pwsh
         run: git clone --depth 1 https://github.com/qarmin/czkawka.git czkawka
 
+      - name: Apply checkpoint backend
+        shell: pwsh
+        run: |
+          git -C czkawka apply --check ../backend-v21.patch
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          git -C czkawka apply ../backend-v21.patch
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
+      - name: Test checkpoint storage
+        shell: pwsh
+        working-directory: czkawka
+        run: cargo test -p czkawka_core checkpoint_cache --lib
+
+
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
 
