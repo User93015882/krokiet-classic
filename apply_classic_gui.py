@@ -97,7 +97,7 @@ tree = once(tree, '''                border-radius: 5px;
                 height: item_height;
                 background: ColorPalette.get_listview_color_with_header(r.focused_row, touch-area.has-hover, r.header_row);''', '''                border-radius: 0px;
                 height: item_height;
-                background: r.header_row ? #dae5f0 : (r.focused_row ? #bed8f3 : (touch-area.has-hover ? #eaf3fb : (idx % 2 == 0 ? #ffffff : #f5f7f9)));''', 'table row styling')
+                background: r.header_row ? #dae5f0 : (r.focused_row ? #bed8f3 : (touch-area.has-hover ? #eaf3fb : (Math.mod(idx, 2) == 0 ? #ffffff : #f5f7f9)));''', 'table row styling')
 
 # Atomic writes only after successful checks. Backups are in the checkout for easy rollback.
 for path, content in ((mw, main), (table, tree)):
