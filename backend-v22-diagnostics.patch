@@ -1,0 +1,132 @@
+--- a/czkawka_core/src/tools/duplicate/checkpoint_cache.rs
++++ b/czkawka_core/src/tools/duplicate/checkpoint_cache.rs
+@@ -1,6 +1,9 @@
+ //! Durable full-hash checkpoints for interrupted duplicate scans.
+ //! A completed hash is committed in SQLite before becoming reusable in future scans.
+-use std::path::PathBuf;
++use std::path::{Path, PathBuf};
++use std::fs::OpenOptions;
++use std::io::Write;
++use std::time::{SystemTime, UNIX_EPOCH};
+ use std::thread::{self, JoinHandle};
+ use std::time::Duration;
+ 
+@@ -16,6 +19,18 @@
+     get_config_cache_path().map(|p| p.cache_folder.join("duplicate_full_hash_checkpoints.sqlite3"))
+ }
+ 
++// Append-only, line-oriented diagnostic log. A timestamp is written to each event.
++// Avoid storing user filenames in the log; checkpoint database itself already holds paths.
++// Unix milliseconds are unambiguous and can be converted to local time in a later GUI view.
++fn record_event(database: &Path, event: &str, details: &str) {
++    let timestamp_ms = SystemTime::now().duration_since(UNIX_EPOCH)
++        .map(|value| value.as_millis()).unwrap_or_default();
++    let log_path = database.with_file_name("duplicate_checkpoint_events.log");
++    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(log_path) {
++        let _ = writeln!(file, "{timestamp_ms}\t{event}\t{details}");
++    }
++}
++
+ fn connect(path: &std::path::Path) -> rusqlite::Result<Connection> {
+     let conn = Connection::open(path)?;
+     conn.busy_timeout(Duration::from_secs(5))?;
+@@ -68,8 +83,16 @@
+         rows.collect()
+     })();
+     match result {
+-        Ok(entries) => { info!("Loaded {} completed hash checkpoints", entries.len()); entries }
+-        Err(err) => { warn!("Cannot load full-hash checkpoints: {err}"); Vec::new() }
++        Ok(entries) => {
++            info!("Loaded {} completed hash checkpoints", entries.len());
++            record_event(&path, "CHECKPOINT_LOAD", &format!("entries={} algorithm={algorithm:?}", entries.len()));
++            entries
++        }
++        Err(err) => {
++            warn!("Cannot load full-hash checkpoints: {err}");
++            record_event(&path, "CHECKPOINT_LOAD_ERROR", "database load failed");
++            Vec::new()
++        }
+     }
+ }
+ 
+@@ -92,6 +115,7 @@
+             warn!("Cannot initialize checkpoint database: {err}");
+             return None;
+         }
++        record_event(&path, "CHECKPOINT_WRITER_START", &format!("algorithm={algorithm:?}"));
+         let (tx, rx) = unbounded();
+         let handle = thread::spawn(move || write_loop(path, format!("{algorithm:?}"), rx));
+         Some(Self { tx, handle })
+@@ -107,23 +131,41 @@
+ fn write_loop(path: PathBuf, algorithm: String, rx: Receiver<DuplicateEntry>) {
+     let Ok(mut conn) = connect(&path) else {
+         warn!("Cannot open checkpoint database for writing");
++        record_event(&path, "CHECKPOINT_WRITE_ERROR", "database open failed");
+         return;
+     };
+     let mut batch = Vec::with_capacity(64);
++    let mut committed: u64 = 0;
++    let mut batches: u64 = 0;
+     loop {
+-        match rx.recv_timeout(Duration::from_secs(2)) {
+-            Ok(entry) => batch.push(entry),
+-            Err(RecvTimeoutError::Timeout) => {},
+-            Err(RecvTimeoutError::Disconnected) => {
+-                if let Err(err) = commit_batch(&mut conn, &mut batch, &algorithm) { warn!("Final checkpoint commit failed: {err}"); }
+-                break;
++        let disconnected = match rx.recv_timeout(Duration::from_secs(2)) {
++            Ok(entry) => { batch.push(entry); false },
++            Err(RecvTimeoutError::Timeout) => false,
++            Err(RecvTimeoutError::Disconnected) => true,
++        };
++        if !batch.is_empty() && (batch.len() >= 64 || rx.is_empty() || disconnected) {
++            let pending = batch.len() as u64;
++            match commit_batch(&mut conn, &mut batch, &algorithm) {
++                Ok(()) => {
++                    committed += pending;
++                    batches += 1;
++                    record_event(&path, "CHECKPOINT_COMMIT", &format!(
++                        "batch_files={pending} total_files={committed} batches={batches} algorithm={algorithm}"
++                    ));
++                }
++                Err(err) => {
++                    warn!("Checkpoint commit failed: {err}");
++                    record_event(&path, "CHECKPOINT_WRITE_ERROR", &format!("batch_files={pending}"));
++                    batch.clear();
++                }
+             }
+         }
+-        if (batch.len() >= 64 || !batch.is_empty() && rx.is_empty())
+-            && let Err(err) = commit_batch(&mut conn, &mut batch, &algorithm) {
+-                warn!("Checkpoint commit failed: {err}");
+-                batch.clear();
+-            }
++        if disconnected {
++            record_event(&path, "CHECKPOINT_WRITER_END", &format!(
++                "total_files={committed} batches={batches} algorithm={algorithm}"
++            ));
++            break;
++        }
+     }
+ }
+ 
+@@ -132,6 +174,19 @@
+     use super::*;
+ 
+     #[test]
++    fn diagnostic_events_have_timestamp_and_are_persistent() {
++        let dir = tempfile::tempdir().unwrap();
++        let db = dir.path().join("cache.sqlite3");
++        record_event(&db, "CHECKPOINT_COMMIT", "batch_files=3");
++        let content = std::fs::read_to_string(dir.path().join("duplicate_checkpoint_events.log")).unwrap();
++        let parts: Vec<&str> = content.trim().split('\t').collect();
++        assert_eq!(parts.len(), 3);
++        assert!(parts[0].parse::<u128>().is_ok());
++        assert_eq!(parts[1], "CHECKPOINT_COMMIT");
++        assert_eq!(parts[2], "batch_files=3");
++    }
++
++    #[test]
+     fn committed_hash_survives_database_reopen_and_invalidates_on_metadata_change() {
+         let dir = tempfile::tempdir().unwrap();
+         let path = dir.path().join("cache.sqlite3");
