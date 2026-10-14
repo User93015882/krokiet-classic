@@ -1,0 +1,87 @@
+--- a/czkawka_core/src/tools/duplicate/core.rs
++++ b/czkawka_core/src/tools/duplicate/core.rs
+@@ -553,6 +553,12 @@
+ 
+         let (loaded_hash_map, mut records_already_cached, mut non_cached_files_to_check) = self.full_hashing_load_cache_at_start(pre_checked_map);
+ 
++        // Inventory counts are disjoint: legacy-cache hits are removed by the original loader;
++        // checkpoint hits are removed below. These are validated hits, not database row counts.
++        let legacy_cache_hits: usize = records_already_cached.values().map(Vec::len).sum();
++        let candidate_count: usize = legacy_cache_hits + non_cached_files_to_check.values().map(Vec::len).sum::<usize>();
++        let mut sqlite_cache_hits: usize = 0;
++
+         // Merge durable checkpoints with the existing validated cache. Never reuse a hash
+         // unless size and modification time agree with the current scan inventory.
+         if self.common_data.use_cache {
+@@ -566,6 +572,7 @@
+                     if let Some(saved) = checkpoint_by_path.get(&entry.path)
+                         && saved.size == *size && saved.modified_date == entry.modified_date && !saved.hash.is_empty() {
+                             records_already_cached.entry(*size).or_default().push(saved.clone());
++                            sqlite_cache_hits += 1;
+                             return false;
+                         }
+                     true
+@@ -574,11 +581,29 @@
+             non_cached_files_to_check.retain(|_, entries| !entries.is_empty());
+         }
+ 
++        let full_hash_misses: usize = non_cached_files_to_check.values().map(Vec::len).sum();
++        let pending_bytes: u64 = non_cached_files_to_check.iter()
++            .map(|(size, files)| size.saturating_mul(files.len() as u64)).sum();
++        if self.common_data.use_cache {
++            checkpoint_cache::scan_event("FULL_HASH_CACHE_SUMMARY", &format!(
++                "algorithm={:?} candidates={} legacy_hits={} sqlite_hits={} misses={} bytes_to_hash={}",
++                self.get_params().hash_type, candidate_count, legacy_cache_hits,
++                sqlite_cache_hits, full_hash_misses, pending_bytes
++            ));
++        }
++
+         progress_handler.join_thread();
+         if check_if_stop_received(stop_flag) {
+             return WorkContinueStatus::Stop;
+         }
+ 
++        let stage_started = std::time::Instant::now();
++        if self.common_data.use_cache {
++            checkpoint_cache::scan_event("FULL_HASH_STAGE_START", &format!(
++                "algorithm={:?} files={} bytes_to_hash={}",
++                self.get_params().hash_type, full_hash_misses, pending_bytes
++            ));
++        }
+         let progress_handler = prepare_thread_handler_common(
+             progress_sender,
+             ToolStage::Duplicate(DuplicateStage::FullHashing),
+@@ -632,6 +657,12 @@
+         // pending entries. A crash loses at most the current uncommitted transaction.
+         drop(checkpoint_sender);
+         if let Some(writer) = checkpoint_writer { writer.finish(); }
++        if self.common_data.use_cache {
++            checkpoint_cache::scan_event("FULL_HASH_STAGE_END", &format!(
++                "algorithm={:?} elapsed_ms={} scheduled_files={} scheduled_bytes={}",
++                check_type, stage_started.elapsed().as_millis(), full_hash_misses, pending_bytes
++            ));
++        }
+         debug!("Finished full hashing");
+ 
+         // Even if clicked stop, save items to cache and show results
+--- a/czkawka_core/src/tools/duplicate/checkpoint_cache.rs
++++ b/czkawka_core/src/tools/duplicate/checkpoint_cache.rs
+@@ -31,6 +31,18 @@
+     }
+ }
+ 
++/// Record scan-level diagnostics beside the checkpoint database.
++/// Logging is best-effort and does not affect duplicate detection.
++pub(super) fn scan_event(event: &str, details: &str) {
++    if let Some(path) = database_path() {
++        if let Some(parent) = path.parent() {
++            if std::fs::create_dir_all(parent).is_ok() {
++                record_event(&path, event, details);
++            }
++        }
++    }
++}
++
+ fn connect(path: &std::path::Path) -> rusqlite::Result<Connection> {
+     let conn = Connection::open(path)?;
+     conn.busy_timeout(Duration::from_secs(5))?;
