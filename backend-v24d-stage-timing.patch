@@ -1,0 +1,106 @@
+diff --git a/krokiet/src/connect_progress_receiver.rs b/krokiet/src/connect_progress_receiver.rs
+index 1cf58e1..1d3d019 100644
+--- a/krokiet/src/connect_progress_receiver.rs
++++ b/krokiet/src/connect_progress_receiver.rs
+@@ -1,7 +1,9 @@
+ use std::thread;
+-use std::cell::RefCell;
+-use std::rc::Rc;
++use std::sync::{Arc, Mutex};
+ use std::time::{Duration, Instant};
++use std::fs::{self, OpenOptions};
++use std::io::Write;
++use std::path::PathBuf;
+ 
+ use chrono::Local;
+ use crossbeam_channel::Receiver;
+@@ -13,11 +15,12 @@ use crate::{MainWindow, ProgressToSend};
+ pub(crate) fn connect_progress_gathering(app: &MainWindow, progress_receiver: Receiver<ProgressData>) -> Timer {
+     // UI-only clocks. They do not affect the scanner or the checksum database.
+     let ui = app.as_weak();
+-    let state = Rc::new(RefCell::new(None::<(Instant, Instant, String)>));
++    let state = Arc::new(Mutex::new(None::<(Instant, Instant, String)>));
++    let update_state = state.clone();
+     let timer = Timer::default();
+     timer.start(TimerMode::Repeated, Duration::from_secs(1), move || {
+         let Some(app) = ui.upgrade() else { return; };
+-        let mut state = state.borrow_mut();
++        let mut state = state.lock().expect("scan timer lock poisoned");
+         if !app.get_scanning() {
+             *state = None;
+             app.set_diagnostic_started_at("—".into());
+@@ -27,16 +30,12 @@ pub(crate) fn connect_progress_gathering(app: &MainWindow, progress_receiver: Re
+             return;
+         }
+         let now = Instant::now();
+-        let current_stage = app.get_progress_datas().step_name.to_string();
++
+         if state.is_none() {
+             app.set_diagnostic_started_at(Local::now().format("%Y-%m-%d %H:%M:%S").to_string().into());
+         }
+         app.set_diagnostic_current_time(Local::now().format("%Y-%m-%d %H:%M:%S").to_string().into());
+-        let (scan_start, stage_start, previous_stage) = state.get_or_insert_with(|| (now, now, current_stage.clone()));
+-        if *previous_stage != current_stage {
+-            *stage_start = now;
+-            *previous_stage = current_stage;
+-        }
++        let (scan_start, stage_start, _) = state.get_or_insert_with(|| (now, now, String::new()));
+         app.set_diagnostic_elapsed(format_duration(now.duration_since(*scan_start)).into());
+         app.set_diagnostic_stage_elapsed(format_duration(now.duration_since(*stage_start)).into());
+     });
+@@ -48,7 +47,23 @@ pub(crate) fn connect_progress_gathering(app: &MainWindow, progress_receiver: Re
+                 return; // Channel closed, so exit the thread since app closing
+             };
+ 
++            let backend_stage = format!("{:?}", progress_data.stage);
++            let stage_state = update_state.clone();
+             a.upgrade_in_event_loop(move |app| {
++                if app.get_scanning() {
++                    let now = Instant::now();
++                    let mut state = stage_state.lock().expect("scan timer lock poisoned");
++                    let (_, stage_start, previous_stage) = state.get_or_insert_with(|| (now, now, String::new()));
++                    if *previous_stage != backend_stage {
++                        if !previous_stage.is_empty() {
++                            write_stage_event("STAGE_END", previous_stage, Some(now.duration_since(*stage_start)));
++                        }
++                        *previous_stage = backend_stage.clone();
++                        *stage_start = now;
++                        write_stage_event("STAGE_START", &backend_stage, None);
++                        app.set_diagnostic_stage_elapsed("00:00:00".into());
++                    }
++                }
+                 let display = progress_data.to_display();
+                 app.set_progress_datas(ProgressToSend {
+                     all_progress: display.all_progress,
+@@ -67,3 +82,15 @@ fn format_duration(duration: Duration) -> String {
+     let seconds = duration.as_secs();
+     format!("{:02}:{:02}:{:02}", seconds / 3600, (seconds / 60) % 60, seconds % 60)
+ }
++
++// Stage changes are logged once per transition, never for each file-progress update.
++// Logging failure must never interfere with a scan.
++fn write_stage_event(event: &str, stage: &str, duration: Option<Duration>) {
++    let Some(root) = std::env::var_os("LOCALAPPDATA") else { return; };
++    let folder = PathBuf::from(root).join("KrokietClassic").join("logs");
++    if fs::create_dir_all(&folder).is_err() { return; }
++    let Ok(mut file) = OpenOptions::new().create(true).append(true).open(folder.join("scan_stages.log")) else { return; };
++    let time = Local::now().format("%Y-%m-%d %H:%M:%S%.3f");
++    let elapsed = duration.map(|d| format!(" duration_ms={}", d.as_millis())).unwrap_or_default();
++    let _ = writeln!(file, "{time}\t{event}\tstage={stage}{elapsed}");
++}
+diff --git a/krokiet/ui/screens/progress.slint b/krokiet/ui/screens/progress.slint
+index 89ef54c..3e89de9 100644
+--- a/krokiet/ui/screens/progress.slint
++++ b/krokiet/ui/screens/progress.slint
+@@ -64,9 +64,9 @@ export component Progress {
+                 spacing: 5px;
+                 Text {
+                     font-size: FontSizes.normal;
+-                    text: (progress_datas.current_progress_size == -1 ? progress_datas.current_progress : progress_datas.current_progress_size) + "%";
++                    text: (progress_datas.current_progress_size == -1 ? progress_datas.current_progress : progress_datas.current_progress_size) < 0 ? "Calculating…" : (progress_datas.current_progress_size == -1 ? progress_datas.current_progress : progress_datas.current_progress_size) + "%";
+                 }
+-                Text { font-size: FontSizes.normal; text: progress_datas.all_progress + "%"; }
++                Text { font-size: FontSizes.normal; text: progress_datas.all_progress < 0 ? "Calculating…" : progress_datas.all_progress + "%"; }
+             }
+         }
+     }
