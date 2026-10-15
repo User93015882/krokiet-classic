@@ -1,0 +1,135 @@
+diff --git a/krokiet/src/connect_progress_receiver.rs b/krokiet/src/connect_progress_receiver.rs
+index 1d3d019..ed5b7ba 100644
+--- a/krokiet/src/connect_progress_receiver.rs
++++ b/krokiet/src/connect_progress_receiver.rs
+@@ -17,6 +17,8 @@ pub(crate) fn connect_progress_gathering(app: &MainWindow, progress_receiver: Re
+     let ui = app.as_weak();
+     let state = Arc::new(Mutex::new(None::<(Instant, Instant, String)>));
+     let update_state = state.clone();
++    let stage_history = Arc::new(Mutex::new(Vec::<String>::new()));
++    let history_state = stage_history.clone();
+     let timer = Timer::default();
+     timer.start(TimerMode::Repeated, Duration::from_secs(1), move || {
+         let Some(app) = ui.upgrade() else { return; };
+@@ -32,6 +34,7 @@ pub(crate) fn connect_progress_gathering(app: &MainWindow, progress_receiver: Re
+         let now = Instant::now();
+ 
+         if state.is_none() {
++            app.set_diagnostic_stage_history("Waiting for processing stages…".into());
+             app.set_diagnostic_started_at(Local::now().format("%Y-%m-%d %H:%M:%S").to_string().into());
+         }
+         app.set_diagnostic_current_time(Local::now().format("%Y-%m-%d %H:%M:%S").to_string().into());
+@@ -49,6 +52,7 @@ pub(crate) fn connect_progress_gathering(app: &MainWindow, progress_receiver: Re
+ 
+             let backend_stage = format!("{:?}", progress_data.stage);
+             let stage_state = update_state.clone();
++            let history_state = history_state.clone();
+             a.upgrade_in_event_loop(move |app| {
+                 if app.get_scanning() {
+                     let now = Instant::now();
+@@ -61,6 +65,11 @@ pub(crate) fn connect_progress_gathering(app: &MainWindow, progress_receiver: Re
+                         *previous_stage = backend_stage.clone();
+                         *stage_start = now;
+                         write_stage_event("STAGE_START", &backend_stage, None);
++                        // Keep a bounded, human-readable view of backend stage transitions.
++                        let mut history = history_state.lock().expect("stage history lock poisoned");
++                        if history.len() >= 16 { history.remove(0); }
++                        history.push(format!("{}  START  {}", Local::now().format("%H:%M:%S"), backend_stage));
++                        app.set_diagnostic_stage_history(history.join("\n").into());
+                         app.set_diagnostic_stage_elapsed("00:00:00".into());
+                     }
+                 }
+diff --git a/krokiet/ui/main_window.slint b/krokiet/ui/main_window.slint
+index 906b3f6..f8f57c9 100644
+--- a/krokiet/ui/main_window.slint
++++ b/krokiet/ui/main_window.slint
+@@ -68,6 +68,7 @@ export component MainWindow inherits Window {
+     in-out property <string> diagnostic_current_time: "—";
+     in-out property <string> diagnostic_elapsed: "00:00:00";
+     in-out property <string> diagnostic_stage_elapsed: "00:00:00";
++    in-out property <string> diagnostic_stage_history: "Waiting for stage events…";
+     in-out property <ProgressToSend> progress_datas: {
+         current_progress: 15,
+         all_progress: 20,
+@@ -106,6 +107,7 @@ export component MainWindow inherits Window {
+                 Rectangle {
+                     vertical-stretch: 1.0;
+                     main_list := MainList {
++                        visible: !root.scanning;
+                         x: 0;
+                         width: preview_or_tool_settings.visible ? parent.width / 2 : parent.width;
+                         height: parent.height;
+@@ -135,8 +137,63 @@ export component MainWindow inherits Window {
+                         }
+                     }
+ 
++                    if root.scanning: Rectangle {
++                        x: 0;
++                        y: 0;
++                        width: parent.width;
++                        height: parent.height;
++                        background: #23272b;
++                        VerticalLayout {
++                            padding: 14px;
++                            spacing: 12px;
++                            Text {
++                                text: "KROKIET CLASSIC  |  SCAN MONITOR";
++                                color: #d8e6f3;
++                                font-size: FontSizes.normal;
++                            }
++                            Rectangle {
++                                background: #30363d;
++                                height: 160px;
++                                border-width: 1px;
++                                border-color: #495767;
++                                Progress {
++                                    width: parent.width;
++                                    height: parent.height;
++                                    progress_datas: root.progress_datas;
++                                    diagnostic_started_at: root.diagnostic_started_at;
++                                    diagnostic_current_time: root.diagnostic_current_time;
++                                    diagnostic_elapsed: root.diagnostic_elapsed;
++                                    diagnostic_stage_elapsed: root.diagnostic_stage_elapsed;
++                                }
++                            }
++                            Rectangle {
++                                background: #30363d;
++                                border-width: 1px;
++                                border-color: #495767;
++                                vertical-stretch: 1;
++                                VerticalLayout {
++                                    padding: 12px;
++                                    spacing: 10px;
++                                    Text {
++                                        text: "STAGE HISTORY  |  Time-stamped processing events";
++                                        color: #d8e6f3;
++                                        font-size: FontSizes.normal;
++                                    }
++                                    Text {
++                                        text: root.diagnostic_stage_history;
++                                        color: #e2e6ec;
++                                        font-size: FontSizes.normal;
++                                        vertical-stretch: 1;
++                                        vertical-alignment: TextVerticalAlignment.top;
++                                        wrap: word-wrap;
++                                    }
++                                }
++                            }
++                        }
++                    }
++
+                     preview_or_tool_settings := Rectangle {
+-                        visible: (GuiState.preview_visible || tool_settings.visible) && GuiState.is_tool_tab_active;
++                        visible: !root.scanning && (GuiState.preview_visible || tool_settings.visible) && GuiState.is_tool_tab_active;
+                         height: parent.height;
+                         x: parent.width / 2;
+                         width: self.visible ? parent.width / 2 : 0;
+@@ -156,7 +213,7 @@ export component MainWindow inherits Window {
+                     }
+                 }
+ 
+-                if root.scanning || root.processing: Progress {
++                if root.processing && !root.scanning: Progress {
+                     horizontal-stretch: 0.0;
+                     progress_datas <=> root.progress_datas;
+                     diagnostic_started_at <=> root.diagnostic_started_at;
