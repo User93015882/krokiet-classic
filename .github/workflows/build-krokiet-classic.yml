@@ -45,6 +45,14 @@ jobs:
           git -C czkawka apply ../backend-v23-diagnostics.patch
           if ($LASTEXITCODE -ne 0) { exit 1 }
 
+      - name: Apply v2.4A SQLite verification
+        shell: pwsh
+        run: |
+          git -C czkawka apply --check ../backend-v24a-sqlite-verification.patch
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          git -C czkawka apply ../backend-v24a-sqlite-verification.patch
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
       - name: Test checkpoint storage
         shell: pwsh
         working-directory: czkawka
