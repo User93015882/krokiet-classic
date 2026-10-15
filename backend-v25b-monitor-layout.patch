@@ -1,0 +1,119 @@
+diff --git a/krokiet/src/connect_progress_receiver.rs b/krokiet/src/connect_progress_receiver.rs
+index ed5b7ba..0976f38 100644
+--- a/krokiet/src/connect_progress_receiver.rs
++++ b/krokiet/src/connect_progress_receiver.rs
+@@ -25,7 +25,7 @@ pub(crate) fn connect_progress_gathering(app: &MainWindow, progress_receiver: Re
+         let mut state = state.lock().expect("scan timer lock poisoned");
+         if !app.get_scanning() {
+             *state = None;
+-            app.set_diagnostic_started_at("—".into());
++            // Preserve the last scan's start timestamp until a new scan begins.
+             app.set_diagnostic_current_time(Local::now().format("%Y-%m-%d %H:%M:%S").to_string().into());
+             app.set_diagnostic_elapsed("00:00:00".into());
+             app.set_diagnostic_stage_elapsed("00:00:00".into());
+@@ -59,16 +59,23 @@ pub(crate) fn connect_progress_gathering(app: &MainWindow, progress_receiver: Re
+                     let mut state = stage_state.lock().expect("scan timer lock poisoned");
+                     let (_, stage_start, previous_stage) = state.get_or_insert_with(|| (now, now, String::new()));
+                     if *previous_stage != backend_stage {
++                        let clock = Local::now().format("%H:%M:%S").to_string();
++                        let mut history = history_state.lock().expect("stage history lock poisoned");
+                         if !previous_stage.is_empty() {
+-                            write_stage_event("STAGE_END", previous_stage, Some(now.duration_since(*stage_start)));
++                            let duration = now.duration_since(*stage_start);
++                            write_stage_event("STAGE_END", previous_stage, Some(duration));
++                            history.push(format!("{clock}  END    {}  ({})", previous_stage, format_duration(duration)));
++                        } else {
++                            // The first backend stage provides an authoritative start event even
++                            // if the UI clock has not yet observed the scanning state.
++                            app.set_diagnostic_started_at(Local::now().format("%Y-%m-%d %H:%M:%S").to_string().into());
+                         }
+                         *previous_stage = backend_stage.clone();
+                         *stage_start = now;
+                         write_stage_event("STAGE_START", &backend_stage, None);
+                         // Keep a bounded, human-readable view of backend stage transitions.
+-                        let mut history = history_state.lock().expect("stage history lock poisoned");
+-                        if history.len() >= 16 { history.remove(0); }
+-                        history.push(format!("{}  START  {}", Local::now().format("%H:%M:%S"), backend_stage));
++                        history.push(format!("{clock}  START  {backend_stage}"));
++                        if history.len() > 40 { let excess = history.len() - 40; history.drain(..excess); }
+                         app.set_diagnostic_stage_history(history.join("\n").into());
+                         app.set_diagnostic_stage_elapsed("00:00:00".into());
+                     }
+diff --git a/krokiet/ui/main_window.slint b/krokiet/ui/main_window.slint
+index f8f57c9..687ac44 100644
+--- a/krokiet/ui/main_window.slint
++++ b/krokiet/ui/main_window.slint
+@@ -153,7 +153,7 @@ export component MainWindow inherits Window {
+                             }
+                             Rectangle {
+                                 background: #30363d;
+-                                height: 160px;
++                                height: 170px;
+                                 border-width: 1px;
+                                 border-color: #495767;
+                                 Progress {
+@@ -166,6 +166,37 @@ export component MainWindow inherits Window {
+                                     diagnostic_stage_elapsed: root.diagnostic_stage_elapsed;
+                                 }
+                             }
++                            HorizontalLayout {
++                                spacing: 12px;
++                                height: 155px;
++                                Rectangle {
++                                    background: #30363d;
++                                    border-width: 1px;
++                                    border-color: #495767;
++                                    horizontal-stretch: 1;
++                                    VerticalLayout {
++                                        padding: 12px;
++                                        spacing: 8px;
++                                        Text { text: "STATISTICS  |  Stage timing"; color: #d8e6f3; font-size: FontSizes.normal; }
++                                        Text { text: "Current stage: " + root.diagnostic_stage_elapsed; color: #e2e6ec; font-size: FontSizes.normal; }
++                                        Text { text: "Total scan: " + root.diagnostic_elapsed; color: #e2e6ec; font-size: FontSizes.normal; }
++                                        Text { text: "Checksum/cache metrics: awaiting live backend events"; color: #b6c1ce; font-size: FontSizes.normal; }
++                                    }
++                                }
++                                Rectangle {
++                                    background: #30363d;
++                                    border-width: 1px;
++                                    border-color: #495767;
++                                    horizontal-stretch: 1;
++                                    VerticalLayout {
++                                        padding: 12px;
++                                        spacing: 8px;
++                                        Text { text: "CURRENT OPERATION"; color: #d8e6f3; font-size: FontSizes.normal; }
++                                        Text { text: root.progress_datas.step_name; color: #e2e6ec; font-size: FontSizes.normal; wrap: word-wrap; }
++                                        Text { text: "Current file and throughput: not yet exposed by backend"; color: #b6c1ce; font-size: FontSizes.normal; }
++                                    }
++                                }
++                            }
+                             Rectangle {
+                                 background: #30363d;
+                                 border-width: 1px;
+@@ -175,17 +206,19 @@ export component MainWindow inherits Window {
+                                     padding: 12px;
+                                     spacing: 10px;
+                                     Text {
+-                                        text: "STAGE HISTORY  |  Time-stamped processing events";
++                                        text: "ACTIVITY LOG  |  Stage starts and completed-stage durations";
+                                         color: #d8e6f3;
+                                         font-size: FontSizes.normal;
+                                     }
+-                                    Text {
+-                                        text: root.diagnostic_stage_history;
+-                                        color: #e2e6ec;
+-                                        font-size: FontSizes.normal;
++                                    ScrollView {
+                                         vertical-stretch: 1;
+-                                        vertical-alignment: TextVerticalAlignment.top;
+-                                        wrap: word-wrap;
++                                        Text {
++                                            text: root.diagnostic_stage_history;
++                                            color: #e2e6ec;
++                                            font-size: FontSizes.normal;
++                                            vertical-alignment: TextVerticalAlignment.top;
++                                            wrap: word-wrap;
++                                        }
+                                     }
+                                 }
+                             }
