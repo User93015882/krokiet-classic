@@ -43,6 +43,12 @@ diff --git a/krokiet/ui/main_window.slint b/krokiet/ui/main_window.slint
 index f8f57c9..687ac44 100644
 --- a/krokiet/ui/main_window.slint
 +++ b/krokiet/ui/main_window.slint
+@@ -1,4 +1,4 @@
+-import { HorizontalBox, LineEdit, Palette, VerticalBox } from "std-widgets.slint";
++import { HorizontalBox, LineEdit, Palette, ScrollView, VerticalBox } from "std-widgets.slint";
+ import { FontSizes } from "globals/fonts.slint";
+ import { LeftSidePanel } from "screens/left_side_panel.slint";
+ import { MainList } from "screens/main_lists.slint";
 @@ -153,7 +153,7 @@ export component MainWindow inherits Window {
                              }
                              Rectangle {
