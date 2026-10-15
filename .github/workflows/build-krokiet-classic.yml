@@ -53,6 +53,14 @@ jobs:
           git -C czkawka apply ../backend-v24a-sqlite-verification.patch
           if ($LASTEXITCODE -ne 0) { exit 1 }
 
+      - name: Apply v2.4B live scan timers
+        shell: pwsh
+        run: |
+          git -C czkawka apply --check ../backend-v24b-live-timers.patch
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          git -C czkawka apply ../backend-v24b-live-timers.patch
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
       - name: Test checkpoint storage
         shell: pwsh
         working-directory: czkawka
