@@ -1,0 +1,172 @@
+diff --git a/krokiet/src/connect_progress_receiver.rs b/krokiet/src/connect_progress_receiver.rs
+index 69b2055..1cf58e1 100644
+--- a/krokiet/src/connect_progress_receiver.rs
++++ b/krokiet/src/connect_progress_receiver.rs
+@@ -3,6 +3,7 @@ use std::cell::RefCell;
+ use std::rc::Rc;
+ use std::time::{Duration, Instant};
+ 
++use chrono::Local;
+ use crossbeam_channel::Receiver;
+ use czkawka_core::common::progress_data::ProgressData;
+ use slint::{ComponentHandle, Timer, TimerMode};
+@@ -19,12 +20,18 @@ pub(crate) fn connect_progress_gathering(app: &MainWindow, progress_receiver: Re
+         let mut state = state.borrow_mut();
+         if !app.get_scanning() {
+             *state = None;
++            app.set_diagnostic_started_at("—".into());
++            app.set_diagnostic_current_time(Local::now().format("%Y-%m-%d %H:%M:%S").to_string().into());
+             app.set_diagnostic_elapsed("00:00:00".into());
+             app.set_diagnostic_stage_elapsed("00:00:00".into());
+             return;
+         }
+         let now = Instant::now();
+         let current_stage = app.get_progress_datas().step_name.to_string();
++        if state.is_none() {
++            app.set_diagnostic_started_at(Local::now().format("%Y-%m-%d %H:%M:%S").to_string().into());
++        }
++        app.set_diagnostic_current_time(Local::now().format("%Y-%m-%d %H:%M:%S").to_string().into());
+         let (scan_start, stage_start, previous_stage) = state.get_or_insert_with(|| (now, now, current_stage.clone()));
+         if *previous_stage != current_stage {
+             *stage_start = now;
+diff --git a/krokiet/ui/main_window.slint b/krokiet/ui/main_window.slint
+index 5bfdb54..906b3f6 100644
+--- a/krokiet/ui/main_window.slint
++++ b/krokiet/ui/main_window.slint
+@@ -64,6 +64,8 @@ export component MainWindow inherits Window {
+     in-out property <bool> stop_requested: false;
+     in-out property <bool> scanning: false;
+     in-out property <bool> processing: false;
++    in-out property <string> diagnostic_started_at: "—";
++    in-out property <string> diagnostic_current_time: "—";
+     in-out property <string> diagnostic_elapsed: "00:00:00";
+     in-out property <string> diagnostic_stage_elapsed: "00:00:00";
+     in-out property <ProgressToSend> progress_datas: {
+@@ -157,6 +159,8 @@ export component MainWindow inherits Window {
+                 if root.scanning || root.processing: Progress {
+                     horizontal-stretch: 0.0;
+                     progress_datas <=> root.progress_datas;
++                    diagnostic_started_at <=> root.diagnostic_started_at;
++                    diagnostic_current_time <=> root.diagnostic_current_time;
+                     diagnostic_elapsed <=> root.diagnostic_elapsed;
+                     diagnostic_stage_elapsed <=> root.diagnostic_stage_elapsed;
+                 }
+diff --git a/krokiet/ui/screens/progress.slint b/krokiet/ui/screens/progress.slint
+index c7b52f9..89ef54c 100644
+--- a/krokiet/ui/screens/progress.slint
++++ b/krokiet/ui/screens/progress.slint
+@@ -5,82 +5,68 @@ import { FontSizes } from "../globals/fonts.slint";
+ 
+ export component Progress {
+     in-out property <ProgressToSend> progress_datas;
++    in-out property <string> diagnostic_started_at: "—";
++    in-out property <string> diagnostic_current_time: "—";
+     in-out property <string> diagnostic_elapsed: "00:00:00";
+     in-out property <string> diagnostic_stage_elapsed: "00:00:00";
+-    preferred-width: 400px;
+-    preferred-height: 40px;
++    preferred-width: 600px;
++    preferred-height: 116px;
+     VerticalLayout {
+-        padding-top: 5px;
++        padding-top: 6px;
++        padding-bottom: 6px;
++        padding-left: 10px;
++        padding-right: 10px;
++        spacing: 4px;
+         Text {
+             font-size: FontSizes.normal;
+-            text: progress-datas.step_name;
+-            horizontal-alignment: TextHorizontalAlignment.center;
++            text: "SCAN DIAGNOSTICS  |  " + progress-datas.step_name;
++            horizontal-alignment: TextHorizontalAlignment.left;
+         }
+-
+         HorizontalLayout {
+-            spacing: 16px;
++            spacing: 24px;
++            Text {
++                font-size: FontSizes.normal;
++                text: "Started: " + diagnostic_started_at;
++            }
++            Text {
++                font-size: FontSizes.normal;
++                text: "Now: " + diagnostic_current_time;
++            }
+             Text {
+                 font-size: FontSizes.normal;
+-                text: "Scan elapsed: " + diagnostic_elapsed;
++                text: "Elapsed: " + diagnostic_elapsed;
+             }
+             Text {
+                 font-size: FontSizes.normal;
+-                text: "Stage elapsed: " + diagnostic_stage_elapsed;
++                text: "Stage: " + diagnostic_stage_elapsed;
+             }
+         }
+-
+         HorizontalLayout {
+             spacing: 5px;
+             VerticalLayout {
+                 spacing: 5px;
+-                Text {
+-                    font-size: FontSizes.normal;
+-                    vertical-alignment: TextVerticalAlignment.center;
+-                    text: Translations.stage_current_text;
+-                }
+-
+-                Text {
+-                    font-size: FontSizes.normal;
+-                    vertical-alignment: TextVerticalAlignment.center;
+-                    text: Translations.stage_all_text;
+-                }
++                Text { font-size: FontSizes.normal; text: "Current stage"; }
++                Text { font-size: FontSizes.normal; text: "Overall scan"; }
+             }
+-
+             VerticalLayout {
+                 spacing: 5px;
+-                VerticalLayout {
+-                    alignment: LayoutAlignment.center;
+-                    ProgressIndicator {
+-                        visible: progress_datas.current_progress >= -0.001;
+-                        height: 8px;
+-                        progress: progress_datas.current_progress_size == -1 ? progress_datas.current_progress / 100.0 : progress_datas.current_progress_size / 100.0;
+-                    }
++                ProgressIndicator {
++                    visible: progress_datas.current_progress >= -0.001;
++                    height: 8px;
++                    progress: progress_datas.current_progress_size == -1 ? progress_datas.current_progress / 100.0 : progress_datas.current_progress_size / 100.0;
+                 }
+-
+-                VerticalLayout {
+-                    alignment: LayoutAlignment.center;
+-                    ProgressIndicator {
+-                        height: 8px;
+-                        progress: progress_datas.all_progress / 100.0;
+-                    }
++                ProgressIndicator {
++                    height: 8px;
++                    progress: progress_datas.all_progress / 100.0;
+                 }
+             }
+-
+             VerticalLayout {
+-                visible: progress_datas.all_progress > -0.001;
+                 spacing: 5px;
+                 Text {
+                     font-size: FontSizes.normal;
+-                    visible: progress_datas.current_progress >= -0.001;
+-                    vertical-alignment: TextVerticalAlignment.center;
+                     text: (progress_datas.current_progress_size == -1 ? progress_datas.current_progress : progress_datas.current_progress_size) + "%";
+                 }
+-
+-                Text {
+-                    font-size: FontSizes.normal;
+-                    vertical-alignment: TextVerticalAlignment.center;
+-                    text: progress_datas.all_progress + "%";
+-                }
++                Text { font-size: FontSizes.normal; text: progress_datas.all_progress + "%"; }
+             }
+         }
+     }
