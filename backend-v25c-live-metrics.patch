@@ -1,0 +1,199 @@
+diff --git a/czkawka_core/src/tools/duplicate/checkpoint_cache.rs b/czkawka_core/src/tools/duplicate/checkpoint_cache.rs
+index ce64f10..df9a643 100644
+--- a/czkawka_core/src/tools/duplicate/checkpoint_cache.rs
++++ b/czkawka_core/src/tools/duplicate/checkpoint_cache.rs
+@@ -15,6 +15,43 @@ use crate::common::config_cache_path::get_config_cache_path;
+ use crate::common::model::HashType;
+ use crate::tools::duplicate::DuplicateEntry;
+ 
++// In-process, stage-scoped counters. SQLite is still the durable source of checksums.
++// No file paths are retained here and no filesystem polling is required by the GUI.
++use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
++static METRICS_VALID: AtomicBool = AtomicBool::new(false);
++static LEGACY_HITS: AtomicU64 = AtomicU64::new(0);
++static SQLITE_HITS: AtomicU64 = AtomicU64::new(0);
++static HASH_MISSES: AtomicU64 = AtomicU64::new(0);
++static PENDING_BYTES: AtomicU64 = AtomicU64::new(0);
++static COMMITTED_FILES: AtomicU64 = AtomicU64::new(0);
++static COMMITTED_BATCHES: AtomicU64 = AtomicU64::new(0);
++
++pub(super) fn clear_live_metrics() {
++    METRICS_VALID.store(false, Ordering::Release);
++}
++
++pub(super) fn set_hash_metrics(legacy: u64, sqlite: u64, misses: u64, bytes: u64) {
++    METRICS_VALID.store(false, Ordering::Release);
++    LEGACY_HITS.store(legacy, Ordering::Relaxed);
++    SQLITE_HITS.store(sqlite, Ordering::Relaxed);
++    HASH_MISSES.store(misses, Ordering::Relaxed);
++    PENDING_BYTES.store(bytes, Ordering::Relaxed);
++    COMMITTED_FILES.store(0, Ordering::Relaxed);
++    COMMITTED_BATCHES.store(0, Ordering::Relaxed);
++    METRICS_VALID.store(true, Ordering::Release);
++}
++
++pub(super) fn live_metrics() -> Option<(u64, u64, u64, u64, u64, u64)> {
++    METRICS_VALID.load(Ordering::Acquire).then(|| (
++        LEGACY_HITS.load(Ordering::Relaxed),
++        SQLITE_HITS.load(Ordering::Relaxed),
++        HASH_MISSES.load(Ordering::Relaxed),
++        PENDING_BYTES.load(Ordering::Relaxed),
++        COMMITTED_FILES.load(Ordering::Relaxed),
++        COMMITTED_BATCHES.load(Ordering::Relaxed),
++    ))
++}
++
+ fn database_path() -> Option<PathBuf> {
+     get_config_cache_path().map(|p| p.cache_folder.join("duplicate_full_hash_checkpoints.sqlite3"))
+ }
+@@ -161,6 +198,8 @@ fn write_loop(path: PathBuf, algorithm: String, rx: Receiver<DuplicateEntry>) {
+                 Ok(()) => {
+                     committed += pending;
+                     batches += 1;
++                    COMMITTED_FILES.fetch_add(pending, Ordering::Relaxed);
++                    COMMITTED_BATCHES.fetch_add(1, Ordering::Relaxed);
+                     record_event(&path, "CHECKPOINT_COMMIT", &format!(
+                         "batch_files={pending} total_files={committed} batches={batches} algorithm={algorithm}"
+                     ));
+diff --git a/czkawka_core/src/tools/duplicate/core.rs b/czkawka_core/src/tools/duplicate/core.rs
+index fc59845..2d1e3b0 100644
+--- a/czkawka_core/src/tools/duplicate/core.rs
++++ b/czkawka_core/src/tools/duplicate/core.rs
+@@ -603,6 +603,7 @@ impl DuplicateFinder {
+         let full_hash_misses: usize = non_cached_files_to_check.values().map(Vec::len).sum();
+         let pending_bytes: u64 = non_cached_files_to_check.iter()
+             .map(|(size, files)| size.saturating_mul(files.len() as u64)).sum();
++        checkpoint_cache::set_hash_metrics(legacy_cache_hits as u64, sqlite_cache_hits as u64, full_hash_misses as u64, pending_bytes);
+         if self.common_data.use_cache {
+             checkpoint_cache::scan_event("FULL_HASH_CACHE_SUMMARY", &format!(
+                 "algorithm={:?} candidates={} legacy_hits={} sqlite_hits={} misses={} bytes_to_hash={}",
+diff --git a/czkawka_core/src/tools/duplicate/mod.rs b/czkawka_core/src/tools/duplicate/mod.rs
+index 958f2eb..fa09b02 100644
+--- a/czkawka_core/src/tools/duplicate/mod.rs
++++ b/czkawka_core/src/tools/duplicate/mod.rs
+@@ -1,5 +1,16 @@
+ pub mod core;
+ mod checkpoint_cache;
++
++/// Clear the previous scan's counters before a new run begins.
++pub fn reset_live_full_hash_metrics() {
++    checkpoint_cache::clear_live_metrics();
++}
++
++/// Snapshot of the active duplicate-file hash stage, for the scan monitor.
++/// Values are stage-scoped and are not total scan statistics.
++pub fn live_full_hash_metrics() -> Option<(u64, u64, u64, u64, u64, u64)> {
++    checkpoint_cache::live_metrics()
++}
+ #[cfg(test)]
+ mod tests;
+ pub mod traits;
+diff --git a/krokiet/src/connect_progress_receiver.rs b/krokiet/src/connect_progress_receiver.rs
+index 0976f38..b5614b8 100644
+--- a/krokiet/src/connect_progress_receiver.rs
++++ b/krokiet/src/connect_progress_receiver.rs
+@@ -19,6 +19,9 @@ pub(crate) fn connect_progress_gathering(app: &MainWindow, progress_receiver: Re
+     let update_state = state.clone();
+     let stage_history = Arc::new(Mutex::new(Vec::<String>::new()));
+     let history_state = stage_history.clone();
++    let last_progress = Arc::new(Mutex::new(None::<Instant>));
++    let progress_for_timer = last_progress.clone();
++    let progress_for_receiver = last_progress.clone();
+     let timer = Timer::default();
+     timer.start(TimerMode::Repeated, Duration::from_secs(1), move || {
+         let Some(app) = ui.upgrade() else { return; };
+@@ -34,6 +37,7 @@ pub(crate) fn connect_progress_gathering(app: &MainWindow, progress_receiver: Re
+         let now = Instant::now();
+ 
+         if state.is_none() {
++            czkawka_core::tools::duplicate::reset_live_full_hash_metrics();
+             app.set_diagnostic_stage_history("Waiting for processing stages…".into());
+             app.set_diagnostic_started_at(Local::now().format("%Y-%m-%d %H:%M:%S").to_string().into());
+         }
+@@ -41,6 +45,20 @@ pub(crate) fn connect_progress_gathering(app: &MainWindow, progress_receiver: Re
+         let (scan_start, stage_start, _) = state.get_or_insert_with(|| (now, now, String::new()));
+         app.set_diagnostic_elapsed(format_duration(now.duration_since(*scan_start)).into());
+         app.set_diagnostic_stage_elapsed(format_duration(now.duration_since(*stage_start)).into());
++        // Cache figures come directly from the hashing backend, never from the text log.
++        if let Some((legacy, sqlite, misses, bytes, committed, batches)) = czkawka_core::tools::duplicate::live_full_hash_metrics() {
++            app.set_diagnostic_cache_metrics(format!("BLAKE3 full hashes | Legacy: {legacy}  SQLite: {sqlite}  New required: {misses}  Bytes scheduled: {bytes}").into());
++            app.set_diagnostic_checkpoint_metrics(format!("SQLite checkpoint commits | Files: {committed}  Batches: {batches}").into());
++        } else {
++            app.set_diagnostic_cache_metrics("Cache statistics: waiting for full hashing".into());
++            app.set_diagnostic_checkpoint_metrics("Checkpoints: waiting for full hashing".into());
++        }
++        let last = *progress_for_timer.lock().expect("backend activity lock poisoned");
++        let activity = match last {
++            Some(when) => format!("Last backend progress update: {}s ago", now.saturating_duration_since(when).as_secs()),
++            None => "Worker activity: waiting for progress events".to_string(),
++        };
++        app.set_diagnostic_worker_activity(activity.into());
+     });
+     let a = app.as_weak();
+ 
+@@ -50,6 +68,7 @@ pub(crate) fn connect_progress_gathering(app: &MainWindow, progress_receiver: Re
+                 return; // Channel closed, so exit the thread since app closing
+             };
+ 
++            *progress_for_receiver.lock().expect("backend activity lock poisoned") = Some(Instant::now());
+             let backend_stage = format!("{:?}", progress_data.stage);
+             let stage_state = update_state.clone();
+             let history_state = history_state.clone();
+diff --git a/krokiet/ui/main_window.slint b/krokiet/ui/main_window.slint
+index ed24ad9..860532b 100644
+--- a/krokiet/ui/main_window.slint
++++ b/krokiet/ui/main_window.slint
+@@ -69,6 +69,9 @@ export component MainWindow inherits Window {
+     in-out property <string> diagnostic_elapsed: "00:00:00";
+     in-out property <string> diagnostic_stage_elapsed: "00:00:00";
+     in-out property <string> diagnostic_stage_history: "Waiting for stage events…";
++    in-out property <string> diagnostic_cache_metrics: "Cache statistics: waiting for full hashing";
++    in-out property <string> diagnostic_checkpoint_metrics: "Checkpoints: waiting for full hashing";
++    in-out property <string> diagnostic_worker_activity: "Worker activity: waiting for progress events";
+     in-out property <ProgressToSend> progress_datas: {
+         current_progress: 15,
+         all_progress: 20,
+@@ -180,7 +183,8 @@ export component MainWindow inherits Window {
+                                         Text { text: "STATISTICS  |  Stage timing"; color: #d8e6f3; font-size: FontSizes.normal; }
+                                         Text { text: "Current stage: " + root.diagnostic_stage_elapsed; color: #e2e6ec; font-size: FontSizes.normal; }
+                                         Text { text: "Total scan: " + root.diagnostic_elapsed; color: #e2e6ec; font-size: FontSizes.normal; }
+-                                        Text { text: "Checksum/cache metrics: awaiting live backend events"; color: #b6c1ce; font-size: FontSizes.normal; }
++                                        Text { text: root.diagnostic_cache_metrics; color: #e2e6ec; font-size: FontSizes.normal; wrap: word-wrap; }
++                                        Text { text: root.diagnostic_checkpoint_metrics; color: #e2e6ec; font-size: FontSizes.normal; wrap: word-wrap; }
+                                     }
+                                 }
+                                 Rectangle {
+@@ -193,7 +197,8 @@ export component MainWindow inherits Window {
+                                         spacing: 8px;
+                                         Text { text: "CURRENT OPERATION"; color: #d8e6f3; font-size: FontSizes.normal; }
+                                         Text { text: root.progress_datas.step_name; color: #e2e6ec; font-size: FontSizes.normal; wrap: word-wrap; }
+-                                        Text { text: "Current file and throughput: not yet exposed by backend"; color: #b6c1ce; font-size: FontSizes.normal; }
++                                        Text { text: root.diagnostic_worker_activity; color: #e2e6ec; font-size: FontSizes.normal; }
++                                        Text { text: "Per-file I/O throughput: not yet exposed"; color: #b6c1ce; font-size: FontSizes.normal; }
+                                     }
+                                 }
+                             }
+@@ -212,12 +217,17 @@ export component MainWindow inherits Window {
+                                     }
+                                     ScrollView {
+                                         vertical-stretch: 1;
+-                                        Text {
+-                                            text: root.diagnostic_stage_history;
+-                                            color: #e2e6ec;
+-                                            font-size: FontSizes.normal;
+-                                            vertical-alignment: TextVerticalAlignment.top;
+-                                            wrap: word-wrap;
++                                        VerticalLayout {
++                                            padding: 0px;
++                                            spacing: 0px;
++                                            Text {
++                                                text: root.diagnostic_stage_history;
++                                                color: #e2e6ec;
++                                                font-size: FontSizes.normal;
++                                                horizontal-alignment: TextHorizontalAlignment.left;
++                                                vertical-alignment: TextVerticalAlignment.top;
++                                                wrap: word-wrap;
++                                            }
+                                         }
+                                     }
+                                 }
