@@ -1,0 +1,123 @@
+diff --git a/krokiet/src/connect_progress_receiver.rs b/krokiet/src/connect_progress_receiver.rs
+index 5158c3f..69b2055 100644
+--- a/krokiet/src/connect_progress_receiver.rs
++++ b/krokiet/src/connect_progress_receiver.rs
+@@ -1,12 +1,38 @@
+ use std::thread;
++use std::cell::RefCell;
++use std::rc::Rc;
++use std::time::{Duration, Instant};
+ 
+ use crossbeam_channel::Receiver;
+ use czkawka_core::common::progress_data::ProgressData;
+-use slint::ComponentHandle;
++use slint::{ComponentHandle, Timer, TimerMode};
+ 
+ use crate::{MainWindow, ProgressToSend};
+ 
+-pub(crate) fn connect_progress_gathering(app: &MainWindow, progress_receiver: Receiver<ProgressData>) {
++pub(crate) fn connect_progress_gathering(app: &MainWindow, progress_receiver: Receiver<ProgressData>) -> Timer {
++    // UI-only clocks. They do not affect the scanner or the checksum database.
++    let ui = app.as_weak();
++    let state = Rc::new(RefCell::new(None::<(Instant, Instant, String)>));
++    let timer = Timer::default();
++    timer.start(TimerMode::Repeated, Duration::from_secs(1), move || {
++        let Some(app) = ui.upgrade() else { return; };
++        let mut state = state.borrow_mut();
++        if !app.get_scanning() {
++            *state = None;
++            app.set_diagnostic_elapsed("00:00:00".into());
++            app.set_diagnostic_stage_elapsed("00:00:00".into());
++            return;
++        }
++        let now = Instant::now();
++        let current_stage = app.get_progress_datas().step_name.to_string();
++        let (scan_start, stage_start, previous_stage) = state.get_or_insert_with(|| (now, now, current_stage.clone()));
++        if *previous_stage != current_stage {
++            *stage_start = now;
++            *previous_stage = current_stage;
++        }
++        app.set_diagnostic_elapsed(format_duration(now.duration_since(*scan_start)).into());
++        app.set_diagnostic_stage_elapsed(format_duration(now.duration_since(*stage_start)).into());
++    });
+     let a = app.as_weak();
+ 
+     thread::spawn(move || {
+@@ -27,4 +53,10 @@ pub(crate) fn connect_progress_gathering(app: &MainWindow, progress_receiver: Re
+             .expect("Failed to spawn thread for progress gathering");
+         }
+     });
++    timer
++}
++
++fn format_duration(duration: Duration) -> String {
++    let seconds = duration.as_secs();
++    format!("{:02}:{:02}:{:02}", seconds / 3600, (seconds / 60) % 60, seconds % 60)
+ }
+diff --git a/krokiet/src/main.rs b/krokiet/src/main.rs
+index 70c6417..3270faf 100644
+--- a/krokiet/src/main.rs
++++ b/krokiet/src/main.rs
+@@ -171,7 +171,7 @@ fn main() {
+     connect_scan_button(&app, progress_sender.clone(), stop_flag.clone(), Arc::clone(&shared_models), Arc::clone(&audio_player));
+     connect_stop_button(&app, stop_flag.clone());
+     connect_open_items(&app);
+-    connect_progress_gathering(&app, progress_receiver);
++    let _scan_diagnostic_timer = connect_progress_gathering(&app, progress_receiver);
+     connect_add_remove_directories(&app);
+     connect_show_preview(&app, Arc::clone(&shared_models));
+     connect_compare(&app, Arc::clone(&shared_models));
+diff --git a/krokiet/ui/main_window.slint b/krokiet/ui/main_window.slint
+index 5b7e853..5bfdb54 100644
+--- a/krokiet/ui/main_window.slint
++++ b/krokiet/ui/main_window.slint
+@@ -64,6 +64,8 @@ export component MainWindow inherits Window {
+     in-out property <bool> stop_requested: false;
+     in-out property <bool> scanning: false;
+     in-out property <bool> processing: false;
++    in-out property <string> diagnostic_elapsed: "00:00:00";
++    in-out property <string> diagnostic_stage_elapsed: "00:00:00";
+     in-out property <ProgressToSend> progress_datas: {
+         current_progress: 15,
+         all_progress: 20,
+@@ -155,6 +157,8 @@ export component MainWindow inherits Window {
+                 if root.scanning || root.processing: Progress {
+                     horizontal-stretch: 0.0;
+                     progress_datas <=> root.progress_datas;
++                    diagnostic_elapsed <=> root.diagnostic_elapsed;
++                    diagnostic_stage_elapsed <=> root.diagnostic_stage_elapsed;
+                 }
+             }
+         }
+diff --git a/krokiet/ui/screens/progress.slint b/krokiet/ui/screens/progress.slint
+index 29e863a..c7b52f9 100644
+--- a/krokiet/ui/screens/progress.slint
++++ b/krokiet/ui/screens/progress.slint
+@@ -5,6 +5,8 @@ import { FontSizes } from "../globals/fonts.slint";
+ 
+ export component Progress {
+     in-out property <ProgressToSend> progress_datas;
++    in-out property <string> diagnostic_elapsed: "00:00:00";
++    in-out property <string> diagnostic_stage_elapsed: "00:00:00";
+     preferred-width: 400px;
+     preferred-height: 40px;
+     VerticalLayout {
+@@ -15,6 +17,18 @@ export component Progress {
+             horizontal-alignment: TextHorizontalAlignment.center;
+         }
+ 
++        HorizontalLayout {
++            spacing: 16px;
++            Text {
++                font-size: FontSizes.normal;
++                text: "Scan elapsed: " + diagnostic_elapsed;
++            }
++            Text {
++                font-size: FontSizes.normal;
++                text: "Stage elapsed: " + diagnostic_stage_elapsed;
++            }
++        }
++
+         HorizontalLayout {
+             spacing: 5px;
+             VerticalLayout {
