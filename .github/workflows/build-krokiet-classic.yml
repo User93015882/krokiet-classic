@@ -92,6 +92,14 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit 1 }
           git -C czkawka apply ../backend-v25b-monitor-layout.patch
           if ($LASTEXITCODE -ne 0) { exit 1 }
+          
+      - name: Apply v2.5C live cache metrics
+        shell: pwsh
+        run: |
+          git -C czkawka apply --check ../backend-v25c-live-metrics.patch
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          git -C czkawka apply ../backend-v25c-live-metrics.patch
+          if ($LASTEXITCODE -ne 0) { exit 1 }
 
       - name: Test checkpoint storage
         shell: pwsh
