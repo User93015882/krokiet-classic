@@ -1,0 +1,46 @@
+--- a/czkawka_core/src/tools/duplicate/core.rs
++++ b/czkawka_core/src/tools/duplicate/core.rs
+@@ -17,6 +17,13 @@
+ use crate::common::tool_data::{CommonData, CommonToolData};
+ use crate::common::traits::ResultEntry;
+ use crate::tools::duplicate::checkpoint_cache::{self, CheckpointWriter};
++
++/// Opt-in independent SQLite recovery test. Never enable implicitly.
++/// Run with KROKIET_VERIFY_SQLITE_ONLY=1 only on disposable scan inputs.
++fn sqlite_only_verification_requested() -> bool {
++    std::env::var("KROKIET_VERIFY_SQLITE_ONLY").is_ok_and(|value| value == "1")
++}
++
+ use crate::tools::duplicate::{
+     DuplicateEntry, DuplicateFinder, DuplicateFinderParameters, Info, PREHASHING_BUFFER_SIZE, THREAD_BUFFER, filter_hard_links, hash_calculation, hash_calculation_limit,
+ };
+@@ -478,9 +485,15 @@
+         &mut self,
+         pre_checked_map: BTreeMap<u64, Vec<DuplicateEntry>>,
+     ) -> (BTreeMap<u64, Vec<DuplicateEntry>>, BTreeMap<u64, Vec<DuplicateEntry>>, BTreeMap<u64, Vec<DuplicateEntry>>) {
++        // Diagnostic-only override: check SQLite reuse without first satisfying candidates
++        // from the legacy binary *full-hash* cache. Never remove any existing cache file.
++        let bypass_legacy = sqlite_only_verification_requested();
++        if bypass_legacy && self.common_data.use_cache {
++            checkpoint_cache::scan_event("SQLITE_ONLY_VERIFICATION", "legacy_full_hash_cache_bypassed=1");
++        }
+         load_and_split_cache_generalized_by_size(
+             &get_duplicate_cache_file(self.get_params().hash_type, false),
+-            self.common_data.use_cache,
++            self.common_data.use_cache && !bypass_legacy,
+             pre_checked_map,
+             self,
+         )
+@@ -529,6 +542,12 @@
+             }
+         }
+ 
++        // In SQLite verification mode do not overwrite the existing legacy cache.
++        // Results still include all restored hashes; only the binary-cache write is skipped.
++        if sqlite_only_verification_requested() {
++            checkpoint_cache::scan_event("SQLITE_ONLY_VERIFICATION", "legacy_full_hash_cache_write_skipped=1");
++            return;
++        }
+         let messages = save_cache_to_file_generalized(
+             &get_duplicate_cache_file(self.get_params().hash_type, false),
+             &all_results,
