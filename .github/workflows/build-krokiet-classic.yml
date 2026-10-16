@@ -117,6 +117,14 @@ jobs:
           git -C czkawka apply ../backend-v25e-completed-report.patch
           if ($LASTEXITCODE -ne 0) { exit 1 }
 
+      - name: Apply v2.6A NAS diagnostics
+        shell: pwsh
+        run: |
+          git -C czkawka apply --check ../backend-v26a-nas-profiling.patch
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          git -C czkawka apply ../backend-v26a-nas-profiling.patch
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
       - name: Test checkpoint storage
         shell: pwsh
         working-directory: czkawka
