@@ -132,6 +132,32 @@ jobs:
         working-directory: czkawka
         run: cargo build --release -p krokiet
 
+      - name: Security scan with Microsoft Defender
+        shell: pwsh
+        run: |
+          $exe = "czkawka/target/release/krokiet.exe"
+
+          if (!(Test-Path $exe)) {
+            throw "Executable not found"
+          }
+
+          Update-MpSignature
+          Start-MpScan -ScanType CustomScan -ScanPath (Resolve-Path $exe).Path
+
+          $detections = @(Get-MpThreatDetection |
+            Where-Object {
+              $_.Resources -match "krokiet.exe"
+            })
+
+          if ($detections.Count -gt 0) {
+            $detections | Format-List
+            throw "Microsoft Defender reported a detection"
+          }
+
+          Write-Host "No matching Defender detection reported."
+          Get-FileHash $exe -Algorithm SHA256 |
+            Format-List
+
       - name: Upload executable
         uses: actions/upload-artifact@v4
         with:
