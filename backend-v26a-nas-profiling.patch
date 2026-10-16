@@ -1,0 +1,163 @@
+--- a/czkawka_core/src/common/dir_traversal.rs
++++ b/czkawka_core/src/common/dir_traversal.rs
+@@ -5,12 +5,12 @@
+ use std::os::unix::fs::MetadataExt;
+ use std::path::{Path, PathBuf};
+ use std::sync::Arc;
+-use std::sync::atomic::AtomicBool;
+-use std::time::UNIX_EPOCH;
++use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
++use std::time::{Instant, UNIX_EPOCH};
+ 
+ use crossbeam_channel::Sender;
+ use fun_time::fun_time;
+-use log::debug;
++use log::{debug, info};
+ use rayon::prelude::*;
+ 
+ use crate::common::directories::Directories;
+@@ -281,6 +281,15 @@
+             grouped_file_entries.entry(key).or_default().push(fe);
+         }
+ 
++        // v2.6A: aggregate timings only; do not log individual NAS paths or requests.
++        let traversal_started = Instant::now();
++        let dirs_read = AtomicU64::new(0);
++        let dirs_failed = AtomicU64::new(0);
++        let entries_seen = AtomicU64::new(0);
++        let dir_read_ns = AtomicU64::new(0);
++        let entry_type_ns = AtomicU64::new(0);
++        let file_processing_ns = AtomicU64::new(0);
++        let file_processing_count = AtomicU64::new(0);
+         // Folder traversal
+         while !folders_to_check.is_empty() {
+             if check_if_stop_received(&stop_flag) {
+@@ -296,13 +305,19 @@
+                     let mut warnings = Vec::new();
+                     let mut fe_result = Vec::new();
+ 
+-                    let Some(read_dir) = common_read_dir(&current_folder, &mut warnings) else {
++                    let directory_started = Instant::now();
++                    let read_dir_result = common_read_dir(&current_folder, &mut warnings);
++                    dir_read_ns.fetch_add(directory_started.elapsed().as_nanos().min(u64::MAX as u128) as u64, Ordering::Relaxed);
++                    let Some(read_dir) = read_dir_result else {
++                        dirs_failed.fetch_add(1, Ordering::Relaxed);
+                         return Some((dir_result, warnings, fe_result));
+                     };
++                    dirs_read.fetch_add(1, Ordering::Relaxed);
+ 
+                     let mut counter = 0;
+                     // Check every sub folder/file/link etc.
+                     for entry in read_dir {
++                        entries_seen.fetch_add(1, Ordering::Relaxed);
+                         if check_if_stop_received(&stop_flag) {
+                             return None;
+                         }
+@@ -310,7 +325,10 @@
+                         let Some(entry_data) = common_get_entry_data(&entry, &mut warnings, &current_folder) else {
+                             continue;
+                         };
+-                        let Ok(file_type) = entry_data.file_type() else { continue };
++                        let type_started = Instant::now();
++                        let type_result = entry_data.file_type();
++                        entry_type_ns.fetch_add(type_started.elapsed().as_nanos().min(u64::MAX as u128) as u64, Ordering::Relaxed);
++                        let Ok(file_type) = type_result else { continue };
+ 
+                         match (entry_type(file_type), collect) {
+                             (EntryType::Dir, Collect::Files | Collect::InvalidSymlinks) => {
+@@ -318,6 +336,7 @@
+                             }
+                             (EntryType::File, Collect::Files) => {
+                                 counter += 1;
++                                let file_started = Instant::now();
+                                 process_file_in_file_mode(
+                                     entry_data,
+                                     &mut warnings,
+@@ -328,6 +347,8 @@
+                                     minimal_file_size,
+                                     maximal_file_size,
+                                 );
++                                file_processing_ns.fetch_add(file_started.elapsed().as_nanos().min(u64::MAX as u128) as u64, Ordering::Relaxed);
++                                file_processing_count.fetch_add(1, Ordering::Relaxed);
+                             }
+                             (EntryType::File, Collect::InvalidSymlinks) => {
+                                 counter += 1;
+@@ -366,6 +387,19 @@
+         }
+ 
+         progress_handler.join_thread();
++        if collect == Collect::Files {
++            info!(
++                "NAS_DIAG_V26A traversal wall_ms={} directories={} directory_failures={} entries={} read_dir_cumulative_ms={} entry_type_cumulative_ms={} file_processing_cumulative_ms={} files_processed={} (cumulative times may exceed wall time with parallel workers)",
++                traversal_started.elapsed().as_millis(),
++                dirs_read.load(Ordering::Relaxed),
++                dirs_failed.load(Ordering::Relaxed),
++                entries_seen.load(Ordering::Relaxed),
++                dir_read_ns.load(Ordering::Relaxed) / 1_000_000,
++                entry_type_ns.load(Ordering::Relaxed) / 1_000_000,
++                file_processing_ns.load(Ordering::Relaxed) / 1_000_000,
++                file_processing_count.load(Ordering::Relaxed)
++            );
++        }
+ 
+         debug!("Collected {} files", grouped_file_entries.values().map(Vec::len).sum::<usize>());
+ 
+--- a/czkawka_core/src/tools/duplicate/core.rs
++++ b/czkawka_core/src/tools/duplicate/core.rs
+@@ -1,12 +1,12 @@
+ use std::collections::BTreeMap;
+ use std::sync::Arc;
+-use std::sync::atomic::AtomicBool;
++use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+ use std::time::Instant;
+ use std::{mem, thread};
+ 
+ use crossbeam_channel::Sender;
+ use fun_time::fun_time;
+-use log::debug;
++use log::{debug, info};
+ use rayon::prelude::*;
+ 
+ use crate::common::cache::{CACHE_DUPLICATE_PREHASH_VERSION, CACHE_DUPLICATE_VERSION, load_and_split_cache_generalized_by_size, save_cache_to_file_generalized};
+@@ -219,6 +219,9 @@
+                 let rayon_max_len = if self.get_hide_hard_links() { 3 } else { 100 };
+ 
+                 let start_time = Instant::now();
++                let identity_ns = AtomicU64::new(0);
++                let identity_groups = AtomicU64::new(0);
++                let identity_files = AtomicU64::new(0);
+                 // We only gather files with more than 1 entry, because only this will be later used
+                 let initial_size = grouped_file_entries
+                     .iter()
+@@ -242,7 +245,15 @@
+                             return None;
+                         }
+ 
+-                        let vector = if self.get_hide_hard_links() { filter_hard_links(vec) } else { vec };
++                        let vector = if self.get_hide_hard_links() {
++                            let count = vec.len() as u64;
++                            let lookup_started = Instant::now();
++                            let result = filter_hard_links(vec);
++                            identity_ns.fetch_add(lookup_started.elapsed().as_nanos().min(u64::MAX as u128) as u64, Ordering::Relaxed);
++                            identity_groups.fetch_add(1, Ordering::Relaxed);
++                            identity_files.fetch_add(count, Ordering::Relaxed);
++                            result
++                        } else { vec };
+ 
+                         if vector.len() > 1 {
+                             Some((size, vector.into_iter().map(FileEntry::into_duplicate_entry).collect()))
+@@ -253,6 +264,14 @@
+                     .collect();
+ 
+                 progress_handler.join_thread();
++                info!(
++                    "NAS_DIAG_V26A hardlink_filter wall_ms={} identity_cumulative_ms={} groups_checked={} files_checked={} enabled={} (identity time is cumulative across parallel workers)",
++                    start_time.elapsed().as_millis(),
++                    identity_ns.load(Ordering::Relaxed) / 1_000_000,
++                    identity_groups.load(Ordering::Relaxed),
++                    identity_files.load(Ordering::Relaxed),
++                    self.get_hide_hard_links()
++                );
+ 
+                 if check_if_stop_received(stop_flag) {
+                     return WorkContinueStatus::Stop;
