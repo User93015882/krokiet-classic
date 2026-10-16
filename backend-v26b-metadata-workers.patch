@@ -1,0 +1,111 @@
+--- a/czkawka_core/src/common/dir_traversal.rs
++++ b/czkawka_core/src/common/dir_traversal.rs
+@@ -21,6 +21,24 @@
+ use crate::common::progress_stop_handler::{check_if_stop_received, prepare_thread_handler_common};
+ use crate::common::tool_data::CommonToolData;
+ use crate::flc;
++
++/// v2.6B: Bound metadata-intensive Rayon work without changing the global pool.
++/// Set KROKIET_METADATA_WORKERS to 1..=32; default is 4.
++pub(crate) fn metadata_worker_limit() -> usize {
++    std::env::var("KROKIET_METADATA_WORKERS")
++        .ok()
++        .and_then(|value| value.trim().parse::<usize>().ok())
++        .filter(|&value| (1..=32).contains(&value))
++        .unwrap_or(4)
++}
++
++pub(crate) fn metadata_thread_pool() -> rayon::ThreadPool {
++    rayon::ThreadPoolBuilder::new()
++        .num_threads(metadata_worker_limit())
++        .thread_name(|index| format!("krokiet-metadata-{index}"))
++        .build()
++        .expect("unable to create scoped metadata worker pool")
++}
+ 
+ #[derive(Copy, Clone, Eq, PartialEq, Debug)]
+ pub enum Collect {
+@@ -290,6 +308,10 @@
+         let entry_type_ns = AtomicU64::new(0);
+         let file_processing_ns = AtomicU64::new(0);
+         let file_processing_count = AtomicU64::new(0);
++        // One scoped pool per traversal; hash workers continue using their own pool.
++        let metadata_pool = metadata_thread_pool();
++        let metadata_workers = metadata_pool.current_num_threads();
++        info!("NAS_DIAG_V26B traversal_config workers={} source=KROKIET_METADATA_WORKERS default=4", metadata_workers);
+         // Folder traversal
+         while !folders_to_check.is_empty() {
+             if check_if_stop_received(&stop_flag) {
+@@ -297,7 +319,7 @@
+                 return DirTraversalResult::Stopped;
+             }
+ 
+-            let segments: Vec<_> = folders_to_check
++            let segments: Vec<_> = metadata_pool.install(|| folders_to_check
+                 .into_par_iter()
+                 .with_max_len(2) // Avoiding checking too many folders in batch
+                 .map(|current_folder| {
+@@ -369,7 +391,7 @@
+                     Some((dir_result, warnings, fe_result))
+                 })
+                 .while_some()
+-                .collect();
++                .collect());
+ 
+             let required_size = segments.iter().map(|(segment, _, _)| segment.len()).sum::<usize>();
+             folders_to_check = Vec::with_capacity(required_size);
+@@ -399,6 +421,7 @@
+                 file_processing_ns.load(Ordering::Relaxed) / 1_000_000,
+                 file_processing_count.load(Ordering::Relaxed)
+             );
++            info!("NAS_DIAG_V26B traversal_summary workers={} wall_ms={} directories={} files_processed={}", metadata_workers, traversal_started.elapsed().as_millis(), dirs_read.load(Ordering::Relaxed), file_processing_count.load(Ordering::Relaxed));
+         }
+ 
+         debug!("Collected {} files", grouped_file_entries.values().map(Vec::len).sum::<usize>());
+--- a/czkawka_core/src/tools/duplicate/core.rs
++++ b/czkawka_core/src/tools/duplicate/core.rs
+@@ -10,7 +10,7 @@
+ use rayon::prelude::*;
+ 
+ use crate::common::cache::{CACHE_DUPLICATE_PREHASH_VERSION, CACHE_DUPLICATE_VERSION, load_and_split_cache_generalized_by_size, save_cache_to_file_generalized};
+-use crate::common::dir_traversal::{DirTraversalBuilder, DirTraversalResult};
++use crate::common::dir_traversal::{DirTraversalBuilder, DirTraversalResult, metadata_thread_pool};
+ use crate::common::model::{CheckingMethod, FileEntry, HashType, ToolType, WorkContinueStatus};
+ use crate::common::progress_data::{CacheLoadPhase, DuplicateStage, ProgressData, ToolStage};
+ use crate::common::progress_stop_handler::{check_if_stop_received, prepare_thread_handler_common};
+@@ -218,6 +218,9 @@
+                 let grouped_file_entries: Vec<(u64, Vec<FileEntry>)> = grouped_file_entries.into_iter().collect();
+                 let rayon_max_len = if self.get_hide_hard_links() { 3 } else { 100 };
+ 
++                let metadata_pool = metadata_thread_pool();
++                let metadata_workers = metadata_pool.current_num_threads();
++                info!("NAS_DIAG_V26B hardlink_config workers={} source=KROKIET_METADATA_WORKERS default=4", metadata_workers);
+                 let start_time = Instant::now();
+                 let identity_ns = AtomicU64::new(0);
+                 let identity_groups = AtomicU64::new(0);
+@@ -229,7 +232,7 @@
+                     .sum::<u64>();
+ 
+                 let progress_handler = prepare_thread_handler_common(progress_sender, ToolStage::Duplicate(DuplicateStage::HidingHardLinks), grouped_file_entries.len(), 0);
+-                self.files_with_identical_size = grouped_file_entries
++                self.files_with_identical_size = metadata_pool.install(|| grouped_file_entries
+                     .into_par_iter()
+                     .with_max_len(rayon_max_len)
+                     .map(|(size, vec)| {
+@@ -261,7 +264,7 @@
+                             None
+                         }
+                     })
+-                    .collect();
++                    .collect());
+ 
+                 progress_handler.join_thread();
+                 info!(
+@@ -272,6 +275,7 @@
+                     identity_files.load(Ordering::Relaxed),
+                     self.get_hide_hard_links()
+                 );
++                info!("NAS_DIAG_V26B hardlink_summary workers={} wall_ms={} groups_checked={} files_checked={}", metadata_workers, start_time.elapsed().as_millis(), identity_groups.load(Ordering::Relaxed), identity_files.load(Ordering::Relaxed));
+ 
+                 if check_if_stop_received(stop_flag) {
+                     return WorkContinueStatus::Stop;
