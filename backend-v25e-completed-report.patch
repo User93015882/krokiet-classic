@@ -1,0 +1,59 @@
+diff --git a/krokiet/ui/main_window.slint b/krokiet/ui/main_window.slint
+index 853eb10..3e8bf2c 100644
+--- a/krokiet/ui/main_window.slint
++++ b/krokiet/ui/main_window.slint
+@@ -152,11 +152,25 @@ export component MainWindow inherits Window {
+                             padding: 14px;
+                             spacing: 12px;
+                             Text {
+-                                text: root.scanning ? "KROKIET CLASSIC  |  SCAN MONITOR" : "KROKIET CLASSIC  |  LAST SCAN REPORT";
++                                text: root.scanning ? "KROKIET CLASSIC  |  SCAN MONITOR" : "KROKIET CLASSIC  |  LAST SCAN REPORT  -  SCAN ENDED";
+                                 color: #d8e6f3;
+                                 font-size: FontSizes.normal;
+                             }
+-                            Rectangle {
++                            if !root.scanning: Rectangle {
++                                background: #30363d;
++                                height: 132px;
++                                border-width: 1px;
++                                border-color: #495767;
++                                VerticalLayout {
++                                    padding: 12px;
++                                    spacing: 9px;
++                                    Text { text: "SCAN ENDED  |  Saved report"; color: #d8e6f3; font-size: FontSizes.normal; }
++                                    Text { text: root.text_summary_text; color: #e2e6ec; font-size: FontSizes.normal; wrap: word-wrap; }
++                                    Text { text: "Started: " + root.diagnostic_started_at + "     Ended: " + root.diagnostic_current_time; color: #e2e6ec; font-size: FontSizes.normal; }
++                                    Text { text: "Total elapsed: " + root.diagnostic_elapsed; color: #e2e6ec; font-size: FontSizes.normal; }
++                                }
++                            }
++                            if root.scanning: Rectangle {
+                                 background: #30363d;
+                                 height: 170px;
+                                 border-width: 1px;
+@@ -182,8 +196,8 @@ export component MainWindow inherits Window {
+                                     VerticalLayout {
+                                         padding: 12px;
+                                         spacing: 8px;
+-                                        Text { text: "STATISTICS  |  Stage timing"; color: #d8e6f3; font-size: FontSizes.normal; }
+-                                        Text { text: "Current stage: " + root.diagnostic_stage_elapsed; color: #e2e6ec; font-size: FontSizes.normal; }
++                                        Text { text: root.scanning ? "STATISTICS  |  Stage timing" : "FINAL STATISTICS  |  BLAKE3 and SQLite"; color: #d8e6f3; font-size: FontSizes.normal; }
++                                        if root.scanning: Text { text: "Current stage: " + root.diagnostic_stage_elapsed; color: #e2e6ec; font-size: FontSizes.normal; }
+                                         Text { text: "Total scan: " + root.diagnostic_elapsed; color: #e2e6ec; font-size: FontSizes.normal; }
+                                         Text { text: root.diagnostic_cache_metrics; color: #e2e6ec; font-size: FontSizes.normal; wrap: word-wrap; }
+                                         Text { text: root.diagnostic_checkpoint_metrics; color: #e2e6ec; font-size: FontSizes.normal; wrap: word-wrap; }
+@@ -197,10 +211,12 @@ export component MainWindow inherits Window {
+                                     VerticalLayout {
+                                         padding: 12px;
+                                         spacing: 8px;
+-                                        Text { text: "CURRENT OPERATION"; color: #d8e6f3; font-size: FontSizes.normal; }
++                                        Text { text: root.scanning ? "CURRENT OPERATION" : "FINAL PROCESSING STAGE"; color: #d8e6f3; font-size: FontSizes.normal; }
+                                         Text { text: root.progress_datas.step_name; color: #e2e6ec; font-size: FontSizes.normal; wrap: word-wrap; }
+-                                        Text { text: root.diagnostic_worker_activity; color: #e2e6ec; font-size: FontSizes.normal; }
+-                                        Text { text: "Per-file I/O throughput: not yet exposed"; color: #b6c1ce; font-size: FontSizes.normal; }
++                                        if root.scanning: Text { text: root.diagnostic_worker_activity; color: #e2e6ec; font-size: FontSizes.normal; }
++                                        if root.scanning: Text { text: "Per-file I/O throughput: not yet exposed"; color: #b6c1ce; font-size: FontSizes.normal; }
++                                        if !root.scanning: Text { text: "Final-stage duration: " + root.diagnostic_stage_elapsed; color: #e2e6ec; font-size: FontSizes.normal; }
++                                        if !root.scanning: Text { text: "All completed stages are listed below."; color: #b6c1ce; font-size: FontSizes.normal; }
+                                     }
+                                 }
+                             }
