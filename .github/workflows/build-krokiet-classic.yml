@@ -164,7 +164,7 @@ jobs:
         working-directory: czkawka
         run: cargo build --release -p krokiet
 
-            - name: Verify complete release with Microsoft Defender
+      - name: Verify complete release with Microsoft Defender
         shell: pwsh
         run: ./.github/scripts/verify-release.ps1
 
