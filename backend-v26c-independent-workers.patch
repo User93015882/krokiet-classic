@@ -1,0 +1,153 @@
+diff --git a/czkawka_core/src/common/dir_traversal.rs b/czkawka_core/src/common/dir_traversal.rs
+index 8834c11..1940cad 100644
+--- a/czkawka_core/src/common/dir_traversal.rs
++++ b/czkawka_core/src/common/dir_traversal.rs
+@@ -10,7 +10,7 @@ use std::time::{Instant, UNIX_EPOCH};
+ 
+ use crossbeam_channel::Sender;
+ use fun_time::fun_time;
+-use log::{debug, info};
++use log::{debug, info, warn};
+ use rayon::prelude::*;
+ 
+ use crate::common::directories::Directories;
+@@ -22,22 +22,73 @@ use crate::common::progress_stop_handler::{check_if_stop_received, prepare_threa
+ use crate::common::tool_data::CommonToolData;
+ use crate::flc;
+ 
+-/// v2.6B: Bound metadata-intensive Rayon work without changing the global pool.
+-/// Set KROKIET_METADATA_WORKERS to 1..=32; default is 4.
+-pub(crate) fn metadata_worker_limit() -> usize {
+-    std::env::var("KROKIET_METADATA_WORKERS")
++/// v2.6C: Metadata pools are independently configurable for slow/network drives.
++/// Stage-specific values take priority over the v2.6B compatibility setting.
++#[derive(Copy, Clone, Debug)]
++pub(crate) enum MetadataStage {
++    Traversal,
++    Hardlinks,
++}
++
++impl MetadataStage {
++    fn configuration(self) -> (&'static str, usize, &'static str) {
++        match self {
++            Self::Traversal => ("KROKIET_TRAVERSAL_WORKERS", 4, "traversal"),
++            Self::Hardlinks => ("KROKIET_HARDLINK_WORKERS", 2, "hardlink"),
++        }
++    }
++}
++
++fn parse_worker_count(name: &str) -> Option<usize> {
++    std::env::var(name)
+         .ok()
+         .and_then(|value| value.trim().parse::<usize>().ok())
+         .filter(|&value| (1..=32).contains(&value))
+-        .unwrap_or(4)
+ }
+ 
+-pub(crate) fn metadata_thread_pool() -> rayon::ThreadPool {
+-    rayon::ThreadPoolBuilder::new()
+-        .num_threads(metadata_worker_limit())
+-        .thread_name(|index| format!("krokiet-metadata-{index}"))
+-        .build()
+-        .expect("unable to create scoped metadata worker pool")
++pub(crate) fn metadata_thread_pool(stage: MetadataStage) -> rayon::ThreadPool {
++    let (stage_key, default_workers, label) = stage.configuration();
++    let stage_override = parse_worker_count(stage_key);
++    let legacy_override = parse_worker_count("KROKIET_METADATA_WORKERS");
++    let (count, source) = if let Some(count) = stage_override {
++        (count, stage_key)
++    } else if let Some(count) = legacy_override {
++        (count, "KROKIET_METADATA_WORKERS")
++    } else {
++        (default_workers, "stage-default")
++    };
++    info!("NAS_DIAG_V26C {}_config requested_workers={} source={} default={}", label, count, source, default_workers);
++
++    let create = |workers| {
++        rayon::ThreadPoolBuilder::new()
++            .num_threads(workers)
++            .thread_name(move |index| format!("krokiet-{label}-{index}"))
++            .build()
++    };
++    match create(count) {
++        Ok(pool) => pool,
++        Err(error) => {
++            warn!("NAS_DIAG_V26C {}_pool_error workers={} error={}; trying single worker", label, count, error);
++            // If even this fails, retain the v2.6B fail-fast semantics.
++            create(1).expect("unable to create even a one-worker metadata thread pool")
++        }
++    }
++}
++
++#[cfg(test)]
++mod v26c_worker_config_tests {
++    use super::*;
++
++    #[test]
++    fn stage_defaults_are_distinct() {
++        assert_eq!(MetadataStage::Traversal.configuration().1, 4);
++        assert_eq!(MetadataStage::Hardlinks.configuration().1, 2);
++    }
++
++    #[test]
++    fn stage_environment_keys_are_distinct() {
++        assert_ne!(MetadataStage::Traversal.configuration().0, MetadataStage::Hardlinks.configuration().0);
++    }
+ }
+ 
+ #[derive(Copy, Clone, Eq, PartialEq, Debug)]
+@@ -309,9 +360,9 @@ where
+         let file_processing_ns = AtomicU64::new(0);
+         let file_processing_count = AtomicU64::new(0);
+         // One scoped pool per traversal; hash workers continue using their own pool.
+-        let metadata_pool = metadata_thread_pool();
++        let metadata_pool = metadata_thread_pool(MetadataStage::Traversal);
+         let metadata_workers = metadata_pool.current_num_threads();
+-        info!("NAS_DIAG_V26B traversal_config workers={} source=KROKIET_METADATA_WORKERS default=4", metadata_workers);
++        info!("NAS_DIAG_V26C traversal_effective workers={}", metadata_workers);
+         // Folder traversal
+         while !folders_to_check.is_empty() {
+             if check_if_stop_received(&stop_flag) {
+@@ -421,7 +472,7 @@ where
+                 file_processing_ns.load(Ordering::Relaxed) / 1_000_000,
+                 file_processing_count.load(Ordering::Relaxed)
+             );
+-            info!("NAS_DIAG_V26B traversal_summary workers={} wall_ms={} directories={} files_processed={}", metadata_workers, traversal_started.elapsed().as_millis(), dirs_read.load(Ordering::Relaxed), file_processing_count.load(Ordering::Relaxed));
++            info!("NAS_DIAG_V26C traversal_summary workers={} wall_ms={} directories={} files_processed={}", metadata_workers, traversal_started.elapsed().as_millis(), dirs_read.load(Ordering::Relaxed), file_processing_count.load(Ordering::Relaxed));
+         }
+ 
+         debug!("Collected {} files", grouped_file_entries.values().map(Vec::len).sum::<usize>());
+diff --git a/czkawka_core/src/tools/duplicate/core.rs b/czkawka_core/src/tools/duplicate/core.rs
+index 4ba5eec..f0424e0 100644
+--- a/czkawka_core/src/tools/duplicate/core.rs
++++ b/czkawka_core/src/tools/duplicate/core.rs
+@@ -10,7 +10,7 @@ use log::{debug, info};
+ use rayon::prelude::*;
+ 
+ use crate::common::cache::{CACHE_DUPLICATE_PREHASH_VERSION, CACHE_DUPLICATE_VERSION, load_and_split_cache_generalized_by_size, save_cache_to_file_generalized};
+-use crate::common::dir_traversal::{DirTraversalBuilder, DirTraversalResult, metadata_thread_pool};
++use crate::common::dir_traversal::{DirTraversalBuilder, DirTraversalResult, MetadataStage, metadata_thread_pool};
+ use crate::common::model::{CheckingMethod, FileEntry, HashType, ToolType, WorkContinueStatus};
+ use crate::common::progress_data::{CacheLoadPhase, DuplicateStage, ProgressData, ToolStage};
+ use crate::common::progress_stop_handler::{check_if_stop_received, prepare_thread_handler_common};
+@@ -226,9 +226,9 @@ impl DuplicateFinder {
+                 let grouped_file_entries: Vec<(u64, Vec<FileEntry>)> = grouped_file_entries.into_iter().collect();
+                 let rayon_max_len = if self.get_hide_hard_links() { 3 } else { 100 };
+ 
+-                let metadata_pool = metadata_thread_pool();
++                let metadata_pool = metadata_thread_pool(MetadataStage::Hardlinks);
+                 let metadata_workers = metadata_pool.current_num_threads();
+-                info!("NAS_DIAG_V26B hardlink_config workers={} source=KROKIET_METADATA_WORKERS default=4", metadata_workers);
++                info!("NAS_DIAG_V26C hardlink_effective workers={}", metadata_workers);
+                 let start_time = Instant::now();
+                 let identity_ns = AtomicU64::new(0);
+                 let identity_groups = AtomicU64::new(0);
+@@ -283,7 +283,7 @@ impl DuplicateFinder {
+                     identity_files.load(Ordering::Relaxed),
+                     self.get_hide_hard_links()
+                 );
+-                info!("NAS_DIAG_V26B hardlink_summary workers={} wall_ms={} groups_checked={} files_checked={}", metadata_workers, start_time.elapsed().as_millis(), identity_groups.load(Ordering::Relaxed), identity_files.load(Ordering::Relaxed));
++                info!("NAS_DIAG_V26C hardlink_summary workers={} wall_ms={} groups_checked={} files_checked={}", metadata_workers, start_time.elapsed().as_millis(), identity_groups.load(Ordering::Relaxed), identity_files.load(Ordering::Relaxed));
+ 
+                 if check_if_stop_received(stop_flag) {
+                     return WorkContinueStatus::Stop;
