@@ -164,35 +164,23 @@ jobs:
         working-directory: czkawka
         run: cargo build --release -p krokiet
 
-      - name: Security scan with Microsoft Defender
+            - name: Verify complete release with Microsoft Defender
         shell: pwsh
-        run: |
-          $exe = "czkawka/target/release/krokiet.exe"
+        run: ./.github/scripts/verify-release.ps1
 
-          if (!(Test-Path $exe)) {
-            throw "Executable not found"
-          }
+      - name: Upload security evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: krokiet-security-evidence
+          path: security-evidence/
+          if-no-files-found: warn
 
-          Update-MpSignature
-          Start-MpScan -ScanType CustomScan -ScanPath (Resolve-Path $exe).Path
-
-          $detections = @(Get-MpThreatDetection |
-            Where-Object {
-              $_.Resources -match "krokiet.exe"
-            })
-
-          if ($detections.Count -gt 0) {
-            $detections | Format-List
-            throw "Microsoft Defender reported a detection"
-          }
-
-          Write-Host "No matching Defender detection reported."
-          Get-FileHash $exe -Algorithm SHA256 |
-            Format-List
-
-      - name: Upload executable
+      - name: Upload verified release ZIP
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: krokiet-classic-windows
-          path: czkawka/target/release/krokiet.exe
+          path: krokiet-classic-release.zip
           if-no-files-found: error
+
