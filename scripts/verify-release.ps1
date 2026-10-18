@@ -1,7 +1,8 @@
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
-$root = (Resolve-Path (Join-Path $PSScriptRoot '../..')).Path
+
+$root = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $buildExe = Join-Path $root 'czkawka/target/release/krokiet.exe'
 $releaseDir = Join-Path $root 'release-staging'
 $releaseZip = Join-Path $root 'krokiet-classic-release.zip'
