@@ -1,0 +1,155 @@
+diff --git a/czkawka_core/src/tools/duplicate/core.rs b/czkawka_core/src/tools/duplicate/core.rs
+index f0424e0..ddb9639 100644
+--- a/czkawka_core/src/tools/duplicate/core.rs
++++ b/czkawka_core/src/tools/duplicate/core.rs
+@@ -25,7 +25,7 @@ fn sqlite_only_verification_requested() -> bool {
+ }
+ 
+ use crate::tools::duplicate::{
+-    DuplicateEntry, DuplicateFinder, DuplicateFinderParameters, Info, PREHASHING_BUFFER_SIZE, THREAD_BUFFER, filter_hard_links, hash_calculation, hash_calculation_limit,
++    DuplicateEntry, DuplicateFinder, DuplicateFinderParameters, Info, PREHASHING_BUFFER_SIZE, THREAD_BUFFER, filter_hard_links_profiled, hash_calculation, hash_calculation_limit,
+ };
+ 
+ impl DuplicateFinder {
+@@ -233,6 +233,12 @@ impl DuplicateFinder {
+                 let identity_ns = AtomicU64::new(0);
+                 let identity_groups = AtomicU64::new(0);
+                 let identity_files = AtomicU64::new(0);
++                let id_high_res = AtomicU64::new(0);
++                let id_other_or_error = AtomicU64::new(0);
++                let id_same_skipped = AtomicU64::new(0);
++                let id_call_ns = AtomicU64::new(0);
++                let id_slow_100ms = AtomicU64::new(0);
++                let id_slow_1000ms = AtomicU64::new(0);
+                 // We only gather files with more than 1 entry, because only this will be later used
+                 let initial_size = grouped_file_entries
+                     .iter()
+@@ -259,7 +265,13 @@ impl DuplicateFinder {
+                         let vector = if self.get_hide_hard_links() {
+                             let count = vec.len() as u64;
+                             let lookup_started = Instant::now();
+-                            let result = filter_hard_links(vec);
++                            let (result, identity_probe) = filter_hard_links_profiled(vec);
++                            id_high_res.fetch_add(identity_probe.high_res, Ordering::Relaxed);
++                            id_other_or_error.fetch_add(identity_probe.other_or_error, Ordering::Relaxed);
++                            id_same_skipped.fetch_add(identity_probe.same_id_skipped, Ordering::Relaxed);
++                            id_call_ns.fetch_add(identity_probe.duration_ns, Ordering::Relaxed);
++                            id_slow_100ms.fetch_add(identity_probe.slow_100ms, Ordering::Relaxed);
++                            id_slow_1000ms.fetch_add(identity_probe.slow_1000ms, Ordering::Relaxed);
+                             identity_ns.fetch_add(lookup_started.elapsed().as_nanos().min(u64::MAX as u128) as u64, Ordering::Relaxed);
+                             identity_groups.fetch_add(1, Ordering::Relaxed);
+                             identity_files.fetch_add(count, Ordering::Relaxed);
+@@ -284,6 +296,18 @@ impl DuplicateFinder {
+                     self.get_hide_hard_links()
+                 );
+                 info!("NAS_DIAG_V26C hardlink_summary workers={} wall_ms={} groups_checked={} files_checked={}", metadata_workers, start_time.elapsed().as_millis(), identity_groups.load(Ordering::Relaxed), identity_files.load(Ordering::Relaxed));
++                info!(
++                    "NAS_DIAG_V26D hardlink_identity workers={} groups={} calls={} successful_id={} other_or_error={} repeated_ids_skipped={} lookup_cumulative_ms={} slow_ge_100ms={} slow_ge_1000ms={} (measurements only; original filtering retained)",
++                    metadata_workers,
++                    identity_groups.load(Ordering::Relaxed),
++                    identity_files.load(Ordering::Relaxed),
++                    id_high_res.load(Ordering::Relaxed),
++                    id_other_or_error.load(Ordering::Relaxed),
++                    id_same_skipped.load(Ordering::Relaxed),
++                    id_call_ns.load(Ordering::Relaxed) / 1_000_000,
++                    id_slow_100ms.load(Ordering::Relaxed),
++                    id_slow_1000ms.load(Ordering::Relaxed),
++                );
+ 
+                 if check_if_stop_received(stop_flag) {
+                     return WorkContinueStatus::Stop;
+diff --git a/czkawka_core/src/tools/duplicate/mod.rs b/czkawka_core/src/tools/duplicate/mod.rs
+index fa09b02..10a6454 100644
+--- a/czkawka_core/src/tools/duplicate/mod.rs
++++ b/czkawka_core/src/tools/duplicate/mod.rs
+@@ -146,34 +146,78 @@ pub struct DuplicateFinder {
+     params: DuplicateFinderParameters,
+ }
+ 
++/// v2.6D: Return aggregate identity-lookup timings without changing which files survive.
++/// Timings are cumulative across files and may exceed stage wall time under Rayon.
++#[derive(Default)]
++struct HardlinkIdentityProbe {
++    calls: u64,
++    high_res: u64,
++    other_or_error: u64,
++    same_id_skipped: u64,
++    duration_ns: u64,
++    slow_100ms: u64,
++    slow_1000ms: u64,
++}
++
+ #[cfg(target_family = "windows")]
+-fn filter_hard_links(vec_file_entry: Vec<FileEntry>) -> Vec<FileEntry> {
++fn filter_hard_links_profiled(vec_file_entry: Vec<FileEntry>) -> (Vec<FileEntry>, HardlinkIdentityProbe) {
+     let mut inodes: IndexSet<u128> = IndexSet::with_capacity(vec_file_entry.len());
+     let mut identical: Vec<FileEntry> = Vec::with_capacity(vec_file_entry.len());
++    let mut probe = HardlinkIdentityProbe::default();
+     for f in vec_file_entry {
+-        if let Ok(file_id::FileId::HighRes { file_id, .. }) = file_id::get_high_res_file_id(&f.path)
+-            && !inodes.insert(file_id)
+-        {
+-            continue;
++        let started = std::time::Instant::now();
++        let identity = file_id::get_high_res_file_id(&f.path);
++        let elapsed = started.elapsed();
++        let ns = elapsed.as_nanos().min(u64::MAX as u128) as u64;
++        probe.calls += 1;
++        probe.duration_ns = probe.duration_ns.saturating_add(ns);
++        probe.slow_100ms += u64::from(elapsed.as_millis() >= 100);
++        probe.slow_1000ms += u64::from(elapsed.as_millis() >= 1000);
++        if let Ok(file_id::FileId::HighRes { file_id, .. }) = identity {
++            probe.high_res += 1;
++            if !inodes.insert(file_id) {
++                probe.same_id_skipped += 1;
++                continue;
++            }
++        } else {
++            probe.other_or_error += 1;
+         }
+         identical.push(f);
+     }
+-    identical
++    (identical, probe)
+ }
+ 
+ #[cfg(target_family = "unix")]
+-fn filter_hard_links(vec_file_entry: Vec<FileEntry>) -> Vec<FileEntry> {
++fn filter_hard_links_profiled(vec_file_entry: Vec<FileEntry>) -> (Vec<FileEntry>, HardlinkIdentityProbe) {
+     let mut inodes: IndexSet<u64> = IndexSet::with_capacity(vec_file_entry.len());
+     let mut identical: Vec<FileEntry> = Vec::with_capacity(vec_file_entry.len());
++    let mut probe = HardlinkIdentityProbe::default();
+     for f in vec_file_entry {
+-        if let Ok(meta) = fs::metadata(&f.path)
+-            && !inodes.insert(meta.ino())
+-        {
+-            continue;
++        let started = std::time::Instant::now();
++        let metadata = fs::metadata(&f.path);
++        let elapsed = started.elapsed();
++        let ns = elapsed.as_nanos().min(u64::MAX as u128) as u64;
++        probe.calls += 1;
++        probe.duration_ns = probe.duration_ns.saturating_add(ns);
++        probe.slow_100ms += u64::from(elapsed.as_millis() >= 100);
++        probe.slow_1000ms += u64::from(elapsed.as_millis() >= 1000);
++        if let Ok(meta) = metadata {
++            probe.high_res += 1;
++            if !inodes.insert(meta.ino()) {
++                probe.same_id_skipped += 1;
++                continue;
++            }
++        } else {
++            probe.other_or_error += 1;
+         }
+         identical.push(f);
+     }
+-    identical
++    (identical, probe)
++}
++
++#[cfg_attr(not(test), allow(dead_code))]
++fn filter_hard_links(vec_file_entry: Vec<FileEntry>) -> Vec<FileEntry> {
++    filter_hard_links_profiled(vec_file_entry).0
+ }
+ 
+ pub trait MyHasher {
