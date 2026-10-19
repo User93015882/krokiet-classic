@@ -148,6 +148,14 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit 1 }
           git -C czkawka apply ../backend-v26d-identity-diagnostics.patch
           if ($LASTEXITCODE -ne 0) { exit 1 }
+          
+      - name: Apply v2.6E file-ID response classification
+        shell: pwsh
+        run: |
+          git -C czkawka apply --check ../backend-v26e-identity-classification.patch
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          git -C czkawka apply ../backend-v26e-identity-classification.patch
+          if ($LASTEXITCODE -ne 0) { exit 1 }
 
       - name: Test checkpoint storage
         shell: pwsh
