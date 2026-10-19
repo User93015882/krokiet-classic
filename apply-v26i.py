@@ -51,7 +51,19 @@ new='''                    if code == 87 {
                             }
                         }
                     }'''
-a=once(a,old,new,'error-87 branch')
+import re
+pattern = r'(?m)^([ \t]*)if code == 87 \{\s*probe_windows_metadata_identity\(&f\.path\);\s*\}'
+matches = list(re.finditer(pattern, a))
+if len(matches) != 1:
+    raise SystemExit(
+        f'v2.6I ABORT: expected one error-87 branch; got {len(matches)}. No files changed.'
+    )
+indent = matches[0].group(1)
+replacement = '\n'.join(
+    indent + line[20:] if line.startswith(' ' * 20) else line
+    for line in new.split('\n')
+)
+a = a[:matches[0].start()] + replacement + a[matches[0].end():]
 # File open + by-handle query are supported on stable Rust. This API may return
 # unusable zero IDs on some providers; in that case the entry must be retained.
 impl='''
