@@ -1,0 +1,57 @@
+--- a/czkawka_core/src/tools/duplicate/mod.rs
++++ b/czkawka_core/src/tools/duplicate/mod.rs
+@@ -165,6 +165,44 @@
+     duration_ns: u64,
+     slow_100ms: u64,
+     slow_1000ms: u64,
++}
++
++// v2.6G: Bound extra SMB metadata probes globally to 32 per process.
++// This is strictly diagnostic: successful metadata is never used for filtering.
++#[cfg(target_family = "windows")]
++static V26G_FALLBACK_SAMPLES: AtomicU64 = AtomicU64::new(0);
++
++#[cfg(target_family = "windows")]
++fn probe_windows_metadata_identity(path: &Path) {
++    use std::os::windows::fs::MetadataExt as _;
++
++    // fetch_update prevents parallel worker races from exceeding the sample limit.
++    let sample = V26G_FALLBACK_SAMPLES.fetch_update(
++        Ordering::Relaxed,
++        Ordering::Relaxed,
++        |current| (current < 32).then_some(current + 1),
++    );
++    let Ok(previous) = sample else { return };
++    let started = std::time::Instant::now();
++    match std::fs::metadata(path) {
++        Ok(metadata) => {
++            log::info!(
++                "NAS_DIAG_V26G windows_metadata_probe sample={} metadata=ok volume_serial_available={} file_index_available={} elapsed_ms={} (no identity values or paths; filtering unchanged)",
++                previous + 1,
++                metadata.volume_serial_number().is_some(),
++                metadata.file_index().is_some(),
++                started.elapsed().as_millis(),
++            );
++        }
++        Err(error) => {
++            log::info!(
++                "NAS_DIAG_V26G windows_metadata_probe sample={} metadata=error raw_os_error={:?} elapsed_ms={} (no paths; filtering unchanged)",
++                previous + 1,
++                error.raw_os_error(),
++                started.elapsed().as_millis(),
++            );
++        }
++    }
+ }
+ 
+ #[cfg(target_family = "windows")]
+@@ -197,6 +235,9 @@
+                 probe.other_or_error += 1;
+                 if let Some(code) = error.raw_os_error() {
+                     *probe.raw_os_errors.entry(code).or_insert(0) += 1;
++                    if code == 87 {
++                        probe_windows_metadata_identity(&f.path);
++                    }
+                 } else {
+                     probe.error_without_raw_code += 1;
+                 }
