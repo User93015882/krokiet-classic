@@ -172,6 +172,14 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit 1 }
           git -C czkawka apply ../backend-v26g-alternative-identity-probe.patch
           if ($LASTEXITCODE -ne 0) { exit 1 }
+          
+      - name: Fix v2.6G Windows identity probe for stable Rust
+        shell: pwsh
+        run: |
+          git -C czkawka apply --check ../backend-v26g-stable-windows-api-fix.patch
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          git -C czkawka apply ../backend-v26g-stable-windows-api-fix.patch
+          if ($LASTEXITCODE -ne 0) { exit 1 }
 
       - name: Test checkpoint storage
         shell: pwsh
