@@ -1,0 +1,92 @@
+--- a/czkawka_core/src/tools/duplicate/mod.rs
++++ b/czkawka_core/src/tools/duplicate/mod.rs
+@@ -174,9 +174,38 @@
+ 
+ #[cfg(target_family = "windows")]
+ fn probe_windows_metadata_identity(path: &Path) {
+-    use std::os::windows::fs::MetadataExt as _;
+-
+-    // fetch_update prevents parallel worker races from exceeding the sample limit.
++    use std::os::windows::io::AsRawHandle;
++
++    // Windows SDK BY_HANDLE_FILE_INFORMATION.  We only report whether the
++    // call succeeds and the identity fields are nonzero, never the values.
++    #[repr(C)]
++    #[derive(Default)]
++    struct FileTime {
++        low: u32,
++        high: u32,
++    }
++    #[repr(C)]
++    #[derive(Default)]
++    struct ByHandleFileInformation {
++        file_attributes: u32,
++        creation_time: FileTime,
++        last_access_time: FileTime,
++        last_write_time: FileTime,
++        volume_serial_number: u32,
++        file_size_high: u32,
++        file_size_low: u32,
++        number_of_links: u32,
++        file_index_high: u32,
++        file_index_low: u32,
++    }
++    #[link(name = "kernel32")]
++    unsafe extern "system" {
++        fn GetFileInformationByHandle(
++            file: *mut std::ffi::c_void,
++            info: *mut ByHandleFileInformation,
++        ) -> i32;
++    }
++
+     let sample = V26G_FALLBACK_SAMPLES.fetch_update(
+         Ordering::Relaxed,
+         Ordering::Relaxed,
+@@ -184,19 +213,37 @@
+     );
+     let Ok(previous) = sample else { return };
+     let started = std::time::Instant::now();
+-    match std::fs::metadata(path) {
+-        Ok(metadata) => {
+-            log::info!(
+-                "NAS_DIAG_V26G windows_metadata_probe sample={} metadata=ok volume_serial_available={} file_index_available={} elapsed_ms={} (no identity values or paths; filtering unchanged)",
+-                previous + 1,
+-                metadata.volume_serial_number().is_some(),
+-                metadata.file_index().is_some(),
+-                started.elapsed().as_millis(),
+-            );
++    match std::fs::File::open(path) {
++        Ok(file) => {
++            let mut info = ByHandleFileInformation::default();
++            // SAFETY: `file` owns a valid open Windows handle; `info` is a
++            // writable, correctly laid out Windows API output structure.
++            let ok = unsafe {
++                GetFileInformationByHandle(file.as_raw_handle(), &mut info)
++            };
++            if ok != 0 {
++                let file_index = (u64::from(info.file_index_high) << 32)
++                    | u64::from(info.file_index_low);
++                log::info!(
++                    "NAS_DIAG_V26G windows_metadata_probe sample={} by_handle=ok volume_serial_nonzero={} file_index_nonzero={} elapsed_ms={} (no identity values or paths; filtering unchanged)",
++                    previous + 1,
++                    info.volume_serial_number != 0,
++                    file_index != 0,
++                    started.elapsed().as_millis(),
++                );
++            } else {
++                let error = std::io::Error::last_os_error();
++                log::info!(
++                    "NAS_DIAG_V26G windows_metadata_probe sample={} by_handle=error raw_os_error={:?} elapsed_ms={} (no paths; filtering unchanged)",
++                    previous + 1,
++                    error.raw_os_error(),
++                    started.elapsed().as_millis(),
++                );
++            }
+         }
+         Err(error) => {
+             log::info!(
+-                "NAS_DIAG_V26G windows_metadata_probe sample={} metadata=error raw_os_error={:?} elapsed_ms={} (no paths; filtering unchanged)",
++                "NAS_DIAG_V26G windows_metadata_probe sample={} open=error raw_os_error={:?} elapsed_ms={} (no paths; filtering unchanged)",
+                 previous + 1,
+                 error.raw_os_error(),
+                 started.elapsed().as_millis(),
