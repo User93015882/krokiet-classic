@@ -181,6 +181,12 @@ jobs:
           git -C czkawka apply ../backend-v26g-stable-windows-api-fix.patch
           if ($LASTEXITCODE -ne 0) { exit 1 }
 
+      - name: Apply v2.6I experimental fallback
+        shell: pwsh
+        run: |
+          python .\v26i-source-update-review.txt .\czkawka
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
       - name: Apply v2.6I experimental file-identity fallback
         shell: pwsh
         run: |
