@@ -1,0 +1,105 @@
+diff --git a/czkawka_core/src/tools/duplicate/core.rs b/czkawka_core/src/tools/duplicate/core.rs
+index ddb9639..6fea5b3 100644
+--- a/czkawka_core/src/tools/duplicate/core.rs
++++ b/czkawka_core/src/tools/duplicate/core.rs
+@@ -235,6 +235,11 @@ impl DuplicateFinder {
+                 let identity_files = AtomicU64::new(0);
+                 let id_high_res = AtomicU64::new(0);
+                 let id_other_or_error = AtomicU64::new(0);
++                let id_other_ok = AtomicU64::new(0);
++                let id_err_unsupported = AtomicU64::new(0);
++                let id_err_permission = AtomicU64::new(0);
++                let id_err_not_found = AtomicU64::new(0);
++                let id_err_other = AtomicU64::new(0);
+                 let id_same_skipped = AtomicU64::new(0);
+                 let id_call_ns = AtomicU64::new(0);
+                 let id_slow_100ms = AtomicU64::new(0);
+@@ -268,6 +273,11 @@ impl DuplicateFinder {
+                             let (result, identity_probe) = filter_hard_links_profiled(vec);
+                             id_high_res.fetch_add(identity_probe.high_res, Ordering::Relaxed);
+                             id_other_or_error.fetch_add(identity_probe.other_or_error, Ordering::Relaxed);
++                            id_other_ok.fetch_add(identity_probe.other_ok, Ordering::Relaxed);
++                            id_err_unsupported.fetch_add(identity_probe.errors_unsupported, Ordering::Relaxed);
++                            id_err_permission.fetch_add(identity_probe.errors_permission, Ordering::Relaxed);
++                            id_err_not_found.fetch_add(identity_probe.errors_not_found, Ordering::Relaxed);
++                            id_err_other.fetch_add(identity_probe.errors_other, Ordering::Relaxed);
+                             id_same_skipped.fetch_add(identity_probe.same_id_skipped, Ordering::Relaxed);
+                             id_call_ns.fetch_add(identity_probe.duration_ns, Ordering::Relaxed);
+                             id_slow_100ms.fetch_add(identity_probe.slow_100ms, Ordering::Relaxed);
+@@ -309,6 +319,17 @@ impl DuplicateFinder {
+                     id_slow_1000ms.load(Ordering::Relaxed),
+                 );
+ 
++                info!(
++                    "NAS_DIAG_V26E hardlink_identity_classification calls={} high_res={} non_highres_ok={} error_unsupported={} error_permission={} error_not_found={} error_other={} (counts only; filtering unchanged)",
++                    identity_files.load(Ordering::Relaxed),
++                    id_high_res.load(Ordering::Relaxed),
++                    id_other_ok.load(Ordering::Relaxed),
++                    id_err_unsupported.load(Ordering::Relaxed),
++                    id_err_permission.load(Ordering::Relaxed),
++                    id_err_not_found.load(Ordering::Relaxed),
++                    id_err_other.load(Ordering::Relaxed),
++                );
++
+                 if check_if_stop_received(stop_flag) {
+                     return WorkContinueStatus::Stop;
+                 }
+diff --git a/czkawka_core/src/tools/duplicate/mod.rs b/czkawka_core/src/tools/duplicate/mod.rs
+index 10a6454..32438ca 100644
+--- a/czkawka_core/src/tools/duplicate/mod.rs
++++ b/czkawka_core/src/tools/duplicate/mod.rs
+@@ -153,6 +153,11 @@ struct HardlinkIdentityProbe {
+     calls: u64,
+     high_res: u64,
+     other_or_error: u64,
++    other_ok: u64,
++    errors_unsupported: u64,
++    errors_permission: u64,
++    errors_not_found: u64,
++    errors_other: u64,
+     same_id_skipped: u64,
+     duration_ns: u64,
+     slow_100ms: u64,
+@@ -173,14 +178,27 @@ fn filter_hard_links_profiled(vec_file_entry: Vec<FileEntry>) -> (Vec<FileEntry>
+         probe.duration_ns = probe.duration_ns.saturating_add(ns);
+         probe.slow_100ms += u64::from(elapsed.as_millis() >= 100);
+         probe.slow_1000ms += u64::from(elapsed.as_millis() >= 1000);
+-        if let Ok(file_id::FileId::HighRes { file_id, .. }) = identity {
+-            probe.high_res += 1;
+-            if !inodes.insert(file_id) {
+-                probe.same_id_skipped += 1;
+-                continue;
++        match identity {
++            Ok(file_id::FileId::HighRes { file_id, .. }) => {
++                probe.high_res += 1;
++                if !inodes.insert(file_id) {
++                    probe.same_id_skipped += 1;
++                    continue;
++                }
++            }
++            Ok(_) => {
++                probe.other_or_error += 1;
++                probe.other_ok += 1;
++            }
++            Err(error) => {
++                probe.other_or_error += 1;
++                match error.kind() {
++                    std::io::ErrorKind::Unsupported => probe.errors_unsupported += 1,
++                    std::io::ErrorKind::PermissionDenied => probe.errors_permission += 1,
++                    std::io::ErrorKind::NotFound => probe.errors_not_found += 1,
++                    _ => probe.errors_other += 1,
++                }
+             }
+-        } else {
+-            probe.other_or_error += 1;
+         }
+         identical.push(f);
+     }
+@@ -209,6 +227,7 @@ fn filter_hard_links_profiled(vec_file_entry: Vec<FileEntry>) -> (Vec<FileEntry>
+             }
+         } else {
+             probe.other_or_error += 1;
++            probe.errors_other += 1;
+         }
+         identical.push(f);
+     }
