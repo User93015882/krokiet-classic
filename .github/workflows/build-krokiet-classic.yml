@@ -187,12 +187,6 @@ jobs:
           python .\v26i-source-update-review.txt .\czkawka
           if ($LASTEXITCODE -ne 0) { exit 1 }
 
-      - name: Apply v2.6I experimental file-identity fallback
-        shell: pwsh
-        run: |
-          python .\apply-v26i.py .\czkawka
-          if ($LASTEXITCODE -ne 0) { exit 1 }
-
       - name: Test checkpoint storage
         shell: pwsh
         working-directory: czkawka
