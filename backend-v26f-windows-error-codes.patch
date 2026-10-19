@@ -1,0 +1,87 @@
+--- a/czkawka_core/src/tools/duplicate/mod.rs
++++ b/czkawka_core/src/tools/duplicate/mod.rs
+@@ -158,6 +158,9 @@
+     errors_permission: u64,
+     errors_not_found: u64,
+     errors_other: u64,
++    /// Numeric OS errors only; never retain paths or filenames.
++    raw_os_errors: std::collections::BTreeMap<i32, u64>,
++    error_without_raw_code: u64,
+     same_id_skipped: u64,
+     duration_ns: u64,
+     slow_100ms: u64,
+@@ -192,6 +195,11 @@
+             }
+             Err(error) => {
+                 probe.other_or_error += 1;
++                if let Some(code) = error.raw_os_error() {
++                    *probe.raw_os_errors.entry(code).or_insert(0) += 1;
++                } else {
++                    probe.error_without_raw_code += 1;
++                }
+                 match error.kind() {
+                     std::io::ErrorKind::Unsupported => probe.errors_unsupported += 1,
+                     std::io::ErrorKind::PermissionDenied => probe.errors_permission += 1,
+--- a/czkawka_core/src/tools/duplicate/core.rs
++++ b/czkawka_core/src/tools/duplicate/core.rs
+@@ -1,5 +1,5 @@
+ use std::collections::BTreeMap;
+-use std::sync::Arc;
++use std::sync::{Arc, Mutex};
+ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+ use std::time::Instant;
+ use std::{mem, thread};
+@@ -240,6 +240,8 @@
+                 let id_err_permission = AtomicU64::new(0);
+                 let id_err_not_found = AtomicU64::new(0);
+                 let id_err_other = AtomicU64::new(0);
++                let id_error_without_raw_code = AtomicU64::new(0);
++                let id_raw_error_counts = Mutex::new(BTreeMap::<i32, u64>::new());
+                 let id_same_skipped = AtomicU64::new(0);
+                 let id_call_ns = AtomicU64::new(0);
+                 let id_slow_100ms = AtomicU64::new(0);
+@@ -278,6 +280,14 @@
+                             id_err_permission.fetch_add(identity_probe.errors_permission, Ordering::Relaxed);
+                             id_err_not_found.fetch_add(identity_probe.errors_not_found, Ordering::Relaxed);
+                             id_err_other.fetch_add(identity_probe.errors_other, Ordering::Relaxed);
++                            id_error_without_raw_code.fetch_add(identity_probe.error_without_raw_code, Ordering::Relaxed);
++                            // One lock acquisition per group, never for each SMB request.
++                            if !identity_probe.raw_os_errors.is_empty() {
++                                let mut totals = id_raw_error_counts.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
++                                for (code, count) in identity_probe.raw_os_errors {
++                                    *totals.entry(code).or_insert(0) += count;
++                                }
++                            }
+                             id_same_skipped.fetch_add(identity_probe.same_id_skipped, Ordering::Relaxed);
+                             id_call_ns.fetch_add(identity_probe.duration_ns, Ordering::Relaxed);
+                             id_slow_100ms.fetch_add(identity_probe.slow_100ms, Ordering::Relaxed);
+@@ -330,6 +340,29 @@
+                     id_err_other.load(Ordering::Relaxed),
+                 );
+ 
++                // v2.6F: numeric OS errors are aggregated without recording filesystem paths.
++                // This is a read-only diagnostic: no lookup is skipped or retried.
++                let raw_error_counts = id_raw_error_counts.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
++                let mut ranked_codes: Vec<(i32, u64)> = raw_error_counts.iter().map(|(&code, &count)| (code, count)).collect();
++                ranked_codes.sort_unstable_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
++                let remaining_codes = ranked_codes.len().saturating_sub(12);
++                let remaining_calls: u64 = ranked_codes.iter().skip(12).map(|(_, count)| *count).sum();
++                let top_codes = ranked_codes.iter().take(12).map(|(code, count)| format!("{}:{}", code, count)).collect::<Vec<_>>().join(",");
++                info!(
++                    "NAS_DIAG_V26F hardlink_os_errors total_error_calls={} raw_code_calls={} without_raw_code={} distinct_codes={} top_code_counts=[{}] omitted_codes={} omitted_calls={} (numeric codes only; no paths; filtering unchanged)",
++                    id_err_unsupported.load(Ordering::Relaxed)
++                        + id_err_permission.load(Ordering::Relaxed)
++                        + id_err_not_found.load(Ordering::Relaxed)
++                        + id_err_other.load(Ordering::Relaxed),
++                    ranked_codes.iter().map(|(_, count)| *count).sum::<u64>(),
++                    id_error_without_raw_code.load(Ordering::Relaxed),
++                    ranked_codes.len(),
++                    top_codes,
++                    remaining_codes,
++                    remaining_calls,
++                );
++                drop(raw_error_counts);
++
+                 if check_if_stop_received(stop_flag) {
+                     return WorkContinueStatus::Stop;
+                 }
