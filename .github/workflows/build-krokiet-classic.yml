@@ -186,6 +186,12 @@ jobs:
         run: |
           python .\v26i-source-update-review.txt .\czkawka
           if ($LASTEXITCODE -ne 0) { exit 1 }
+          
+      - name: Apply v2.6J fallback timing diagnostics
+        shell: pwsh
+        run: |
+          python .\apply-v26j.txt .\czkawka
+          if ($LASTEXITCODE -ne 0) { exit 1 }
 
       - name: Test checkpoint storage
         shell: pwsh
