@@ -1,0 +1,42 @@
+#!/usr/bin/env python3
+"""v2.6J: instrumentation only, apply after v2.6I. No partial writes."""
+import pathlib,sys
+root=pathlib.Path(sys.argv[1] if len(sys.argv)>1 else 'czkawka')
+mod=root/'czkawka_core/src/tools/duplicate/mod.rs'
+core=root/'czkawka_core/src/tools/duplicate/core.rs'
+a=mod.read_text(encoding='utf-8'); b=core.read_text(encoding='utf-8')
+
+def replace_one(hay,old,new,label):
+    n=hay.count(old)
+    if n!=1: raise SystemExit(f'v2.6J ABORT {label}: expected exactly one anchor, found {n}; no files changed')
+    return hay.replace(old,new,1)
+
+# Avoid v2.6G's extra diagnostic file-open on 32 sampled entries.
+a=replace_one(a, '                        probe_windows_metadata_identity(&f.path);\n                        match v26i_windows_file_identity(&f.path) {',
+'''                        // v2.6J: measure the real fallback, not a second diagnostic open.
+                        let fallback_started = std::time::Instant::now();
+                        let fallback_result = v26i_windows_file_identity(&f.path);
+                        probe.fallback_elapsed_ns = probe.fallback_elapsed_ns.saturating_add(
+                            fallback_started.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64
+                        );
+                        match fallback_result {''','fallback query')
+a=replace_one(a,'    fallback_same_id_skipped: u64,',
+'''    fallback_same_id_skipped: u64,
+    fallback_elapsed_ns: u64,''','probe timing field')
+b=replace_one(b,'                let id_fallback_skipped = AtomicU64::new(0);',
+'''                let id_fallback_skipped = AtomicU64::new(0);
+                let id_fallback_elapsed_ns = AtomicU64::new(0);''','aggregate timer')
+b=replace_one(b,'                            id_fallback_skipped.fetch_add(identity_probe.fallback_same_id_skipped, Ordering::Relaxed);',
+'''                            id_fallback_skipped.fetch_add(identity_probe.fallback_same_id_skipped, Ordering::Relaxed);
+                            id_fallback_elapsed_ns.fetch_add(identity_probe.fallback_elapsed_ns, Ordering::Relaxed);''','aggregate timing')
+# Add separate summary just before the existing v2.6I log, preserving it.
+needle='''                info!("NAS_DIAG_V26I fallback_identity success={} failed_or_unusable={} same_identity_skipped={} (error_87_only; distinct_api_namespace; no paths or ids)",'''
+b=replace_one(b,needle,
+'''                info!("NAS_DIAG_V26J fallback_timing cumulative_ms={} success={} errors={} (across_workers; not wall_time)",
+                    id_fallback_elapsed_ns.load(Ordering::Relaxed) / 1_000_000,
+                    id_fallback_ok.load(Ordering::Relaxed),
+                    id_fallback_errors.load(Ordering::Relaxed));
+'''+needle,'timing log')
+# No source files are written unless *all* independent checks passed.
+mod.write_text(a,encoding='utf-8');core.write_text(b,encoding='utf-8')
+print('V26J_PATCH_APPLIED')
