@@ -1,0 +1,85 @@
+#!/usr/bin/env python3
+"""v2.6K opt-in direct fallback benchmark. Apply after v2.6J. Atomic preflight."""
+import pathlib,sys
+root=pathlib.Path(sys.argv[1] if len(sys.argv)>1 else 'czkawka')
+mod=root/'czkawka_core/src/tools/duplicate/mod.rs'
+core=root/'czkawka_core/src/tools/duplicate/core.rs'
+a=mod.read_text(encoding='utf-8'); b=core.read_text(encoding='utf-8')
+
+def one(src,old,new,name):
+    n=src.count(old)
+    if n!=1: raise SystemExit(f'V26K_ABORT {name}: expected 1 anchor, found {n}; no files changed')
+    return src.replace(old,new,1)
+
+a=one(a,'    fallback_elapsed_ns: u64,','''    fallback_elapsed_ns: u64,
+    direct_attempts: u64,
+    direct_usable: u64,
+    direct_unusable: u64,''','probe fields')
+a=one(a,'''    let mut probe = HardlinkIdentityProbe::default();
+    for f in vec_file_entry {
+        let started = std::time::Instant::now();
+        let identity = file_id::get_high_res_file_id(&f.path);''','''    let mut probe = HardlinkIdentityProbe::default();
+    // Explicit, per-process experiment. No automatic SMB detection; no other
+    // drives or subtrees are opted in. Path::starts_with checks components,
+    // so W:\\Incoming2 never matches W:\\Incoming.
+    let direct_root = std::env::var_os("KROKIET_V26K_DIRECT_FALLBACK_ROOT")
+        .filter(|value| !value.is_empty())
+        .map(std::path::PathBuf::from)
+        .filter(|path| path.is_absolute());
+    for f in vec_file_entry {
+        if direct_root.as_ref().is_some_and(|root| f.path.starts_with(root)) {
+            probe.direct_attempts += 1;
+            let fallback_started = std::time::Instant::now();
+            let fallback_result = v26i_windows_file_identity(&f.path);
+            probe.fallback_elapsed_ns = probe.fallback_elapsed_ns.saturating_add(
+                fallback_started.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64
+            );
+            match fallback_result {
+                Ok(Some((volume, index))) => {
+                    let namespace = f.path.components().next()
+                        .map(|part| part.as_os_str().to_string_lossy().to_ascii_lowercase())
+                        .unwrap_or_default();
+                    if namespace.is_empty() {
+                        probe.direct_unusable += 1;
+                        probe.fallback_errors += 1;
+                    } else {
+                        probe.direct_usable += 1;
+                        probe.fallback_ok += 1;
+                        if !fallback_inodes.insert((namespace, volume, index)) {
+                            probe.fallback_same_id_skipped += 1;
+                            probe.same_id_skipped += 1;
+                            continue;
+                        }
+                    }
+                }
+                Ok(None) | Err(_) => {
+                    // Conservatively retain any file with an unknown ID.
+                    probe.direct_unusable += 1;
+                    probe.fallback_errors += 1;
+                }
+            }
+            identical.push(f);
+            continue;
+        }
+        let started = std::time::Instant::now();
+        let identity = file_id::get_high_res_file_id(&f.path);''','windows opt-in branch')
+b=one(b,'                let id_fallback_elapsed_ns = AtomicU64::new(0);','''                let id_fallback_elapsed_ns = AtomicU64::new(0);
+                let id_direct_attempts = AtomicU64::new(0);
+                let id_direct_usable = AtomicU64::new(0);
+                let id_direct_unusable = AtomicU64::new(0);''','aggregation fields')
+b=one(b,'                            id_fallback_elapsed_ns.fetch_add(identity_probe.fallback_elapsed_ns, Ordering::Relaxed);','''                            id_fallback_elapsed_ns.fetch_add(identity_probe.fallback_elapsed_ns, Ordering::Relaxed);
+                            id_direct_attempts.fetch_add(identity_probe.direct_attempts, Ordering::Relaxed);
+                            id_direct_usable.fetch_add(identity_probe.direct_usable, Ordering::Relaxed);
+                            id_direct_unusable.fetch_add(identity_probe.direct_unusable, Ordering::Relaxed);''','aggregation updates')
+b=one(b,'''                info!("NAS_DIAG_V26J fallback_timing cumulative_ms={} success={} errors={} (across_workers; not wall_time)",''','''                info!("NAS_DIAG_V26K direct_fallback attempts={} usable={} unusable={} bypassed_original={} (opt_in_only; no paths or ids)",
+                    id_direct_attempts.load(Ordering::Relaxed),
+                    id_direct_usable.load(Ordering::Relaxed),
+                    id_direct_unusable.load(Ordering::Relaxed),
+                    id_direct_attempts.load(Ordering::Relaxed));
+                info!("NAS_DIAG_V26J fallback_timing cumulative_ms={} success={} errors={} (across_workers; not wall_time)",''','new log')
+b=one(b, 'error_87_only; distinct_api_namespace; no paths or ids',
+      'error_87_or_direct_opt_in; distinct_api_namespace; no paths or ids',
+      'correct diagnostic label')
+# Preflight all edits before writing either file.
+mod.write_text(a,encoding='utf-8');core.write_text(b,encoding='utf-8')
+print('V26K_PATCH_APPLIED opt_in_only=1')
