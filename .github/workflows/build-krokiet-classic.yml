@@ -198,6 +198,12 @@ jobs:
           python .\apply-v26j.txt .\czkawka
           if ($LASTEXITCODE -ne 0) { exit 1 }
 
+      - name: Apply v2.6K direct SMB fallback experiment
+        shell: pwsh
+        run: |
+          python .\apply-v26k.txt .\czkawka
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
       - name: Test checkpoint storage
         shell: pwsh
         working-directory: czkawka
