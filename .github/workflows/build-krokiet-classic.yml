@@ -17,9 +17,17 @@ jobs:
       - name: Check out wrapper repository
         uses: actions/checkout@v4
 
-      - name: Clone upstream Czkawka
+      - name: Clone upstream Czkawka (pinned version)
         shell: pwsh
-        run: git clone --depth 1 https://github.com/qarmin/czkawka.git czkawka
+        run: |
+          git clone --depth 1 https://github.com/qarmin/czkawka.git czkawka
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
+          git -C czkawka fetch --depth 1 origin f9be31f586
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
+          git -C czkawka checkout --detach FETCH_HEAD
+          if ($LASTEXITCODE -ne 0) { exit 1 }
 
       - name: Apply checkpoint backend
         shell: pwsh
