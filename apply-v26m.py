@@ -78,13 +78,11 @@ fn filter_hard_links(vec_file_entry: Vec<FileEntry>) -> Vec<FileEntry> {
 # Create the cache inside the scan method, outside of rayon's per-size-group closure.
 b=once(b,'use crate::tools::duplicate::{', '#[cfg(target_family = "windows")]\nuse crate::tools::duplicate::V26MDirectoryCache;\nuse crate::tools::duplicate::{', 'core import')
 # NOTE: cfg attributes inside grouped use imports are supported by Rust.
-needle='''                self.files_with_identical_size = grouped_file_entries
-                    .into_par_iter()'''
+needle='''                let initial_size = grouped_file_entries'''
 replacement='''                #[cfg(target_family = "windows")]
                 let v26m_directory_cache = V26MDirectoryCache::default();
-                self.files_with_identical_size = grouped_file_entries
-                    .into_par_iter()'''
-b=once(b,needle,replacement,'scan-scoped cache')
+                let initial_size = grouped_file_entries'''
+b=once(b,needle,replacement,'scan-scoped cache before initial_size')
 needle='''                            let (result, identity_probe) = filter_hard_links_profiled(vec);'''
 replacement='''                            #[cfg(target_family = "windows")]
                             let (result, identity_probe) = filter_hard_links_profiled(vec, &v26m_directory_cache);
