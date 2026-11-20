@@ -204,6 +204,10 @@ jobs:
           python .\apply-v26k.txt .\czkawka
           if ($LASTEXITCODE -ne 0) { exit 1 }
 
+      - name: Apply v2.6L directory identity experiment
+        shell: bash
+        run: python apply-v26l.py czkawka
+
       - name: Test checkpoint storage
         shell: pwsh
         working-directory: czkawka
