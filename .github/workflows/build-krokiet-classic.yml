@@ -208,6 +208,10 @@ jobs:
         shell: bash
         run: python apply-v26l.py czkawka
 
+      - name: Apply v2.6M scan-wide directory identity cache
+        shell: bash
+        run: python apply-v26m.py czkawka
+
       - name: Test checkpoint storage
         shell: pwsh
         working-directory: czkawka
