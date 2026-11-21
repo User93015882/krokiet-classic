@@ -211,10 +211,6 @@ jobs:
       - name: Apply v2.6M scan-wide directory identity cache
         shell: bash
         run: python apply-v26m.py czkawka
-        
-      - name: Apply v2.6N isolated forced-fallback diagnostic
-        shell: bash
-        run: python apply-v26n-failure-injection.py czkawka
 
       - name: Test checkpoint storage
         shell: pwsh
