@@ -4,6 +4,7 @@ Apply AFTER v26M; omit the v26N test-only patch for normal builds.
 """
 from pathlib import Path
 import sys
+import re
 
 if len(sys.argv)!=2:
     raise SystemExit('Usage: python apply-v26o.py czkawka')
@@ -12,12 +13,51 @@ if not p.is_file():
     raise SystemExit(f'V26O_ABORT missing source: {p}')
 s=p.read_text(encoding='utf-8')
 
-def replace_once(old,new,name):
+def replace_once(old, new, name):
+    """Accept whitespace changes in the pinned tag without weakening uniqueness checks."""
     global s
-    n=s.count(old)
-    if n!=1:
-        raise SystemExit(f'V26O_ABORT {name}: expected exactly one anchor, found {n}; source unchanged')
-    s=s.replace(old,new,1)
+    count = s.count(old)
+    if count == 1:
+        s = s.replace(old, new, 1)
+        return
+    if count > 1:
+        raise SystemExit(f'V26O_ABORT {name}: ambiguous exact anchor count={count}; source unchanged')
+    # GitHub's pinned 12.0.2 tree differs in whitespace/formatting from
+    # the later source snapshot. Check token text but tolerate whitespace.
+    pattern = r'\s*'.join(re.escape(x) for x in re.findall(r'\S+', old))
+    matches = list(re.finditer(pattern, s, flags=re.MULTILINE))
+    if len(matches) != 1:
+        raise SystemExit(f'V26O_ABORT {name}: expected unique semantic anchor, found {len(matches)}; source unchanged')
+    s = s[:matches[0].start()] + new + s[matches[0].end():]
+
+def replace_directory_read():
+    """Instrument the actual common_read_dir call, preserving its else branch."""
+    global s
+    # Match only inside the traversal loop, not the common_read_dir definition.
+    pattern = (r'(?P<indent>^[ \t]*)let\s+Some\s*\(\s*(?P<name>\w+)\s*\)'
+               r'\s*=\s*common_read_dir\s*\((?P<args>[^;]*?)\)'
+               r'\s*else\s*\{(?P<failure>[^{}]*?)\}\s*;')
+    matches = list(re.finditer(pattern, s, flags=re.MULTILINE | re.DOTALL))
+    if len(matches) != 1:
+        nearby = [x.strip()[:160] for x in s.splitlines() if 'common_read_dir(' in x and 'fn common_read_dir' not in x]
+        raise SystemExit(f'V26O_ABORT directory reading: expected one common_read_dir let-else, found {len(matches)}. Nearby calls: {nearby[:3]!r}. Source unchanged')
+    match = matches[0]
+    indent = match.group('indent')
+    var = match.group('name')
+    args = match.group('args')
+    failure = match.group('failure')
+    snippet = (f'{indent}let v26o_dir_started = v26o_stats.as_ref().map(|_| V26OInstant::now());\n'
+               f'{indent}let v26o_read_dir_result = common_read_dir({args});\n'
+               f'{indent}if let (Some(stats), Some(started)) = (v26o_stats.as_ref(), v26o_dir_started) {{\n'
+               f'{indent}    stats.read_dir_calls.fetch_add(1, V26OOrdering::Relaxed);\n'
+               f'{indent}    stats.read_dir_ns.fetch_add(v26o_time_ns(started), V26OOrdering::Relaxed);\n'
+               f'{indent}    if v26o_read_dir_result.is_none() {{\n'
+               f'{indent}        stats.read_dir_failures.fetch_add(1, V26OOrdering::Relaxed);\n'
+               f'{indent}    }}\n'
+               f'{indent}}}\n'
+               f'{indent}let Some({var}) = v26o_read_dir_result else {{{failure}}};')
+    snippet = snippet.replace('\\n', '\n')
+    s = s[:match.start()] + snippet + s[match.end():]
 
 # The pinned upstream tag may import AtomicBool via a grouped `use` or a
 # different order. Insert collision-proof imports without touching existing ones.
@@ -54,20 +94,7 @@ replace_once('        assert_ne!(self.tool_type, ToolType::None, "Tool type cann
         let v26o_enabled = std::env::var("KROKIET_V26O_TRAVERSAL_DIAG").is_ok_and(|s| s == "1");
         let v26o_stats = v26o_enabled.then(|| Arc::new(V26OTraversalStats::default()));
         let v26o_total_start = v26o_enabled.then(V26OInstant::now);''', 'activation')
-replace_once('''                    let Some(read_dir) = common_read_dir(&current_folder, &mut warnings) else {
-                        return Some((dir_result, warnings, fe_result));
-                    };''','''                    let v26o_dir_started = v26o_stats.as_ref().map(|_| V26OInstant::now());
-                    let read_dir = common_read_dir(&current_folder, &mut warnings);
-                    if let (Some(stats), Some(started)) = (v26o_stats.as_ref(), v26o_dir_started) {
-                        stats.read_dir_calls.fetch_add(1, V26OOrdering::Relaxed);
-                        stats.read_dir_ns.fetch_add(v26o_time_ns(started), V26OOrdering::Relaxed);
-                        if read_dir.is_none() {
-                            stats.read_dir_failures.fetch_add(1, V26OOrdering::Relaxed);
-                        }
-                    }
-                    let Some(read_dir) = read_dir else {
-                        return Some((dir_result, warnings, fe_result));
-                    };''','directory reading')
+replace_directory_read()
 replace_once('''                        let Some(entry_data) = common_get_entry_data(&entry, &mut warnings, &current_folder) else {
                             continue;
                         };
