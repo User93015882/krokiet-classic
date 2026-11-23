@@ -216,6 +216,10 @@ jobs:
         shell: bash
         run: python apply-v26o.py czkawka    
 
+      - name: Apply v2.6Q native enumeration validation
+        shell: bash
+        run: python apply-v26q.py czkawka
+
       - name: Test checkpoint storage
         shell: pwsh
         working-directory: czkawka
