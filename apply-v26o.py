@@ -31,33 +31,38 @@ def replace_once(old, new, name):
     s = s[:matches[0].start()] + new + s[matches[0].end():]
 
 def replace_directory_read():
-    """Instrument the actual common_read_dir call, preserving its else branch."""
+    """Time the unique common_read_dir invocation, preserving ALL existing control flow.
+
+    Supports both the original `let Some(read_dir) = ... else {...};` and the
+    pinned checkout's `let read_dir_result = common_read_dir(...);` form.
+    """
     global s
-    # Match only inside the traversal loop, not the common_read_dir definition.
-    pattern = (r'(?P<indent>^[ \t]*)let\s+Some\s*\(\s*(?P<name>\w+)\s*\)'
-               r'\s*=\s*common_read_dir\s*\((?P<args>[^;]*?)\)'
-               r'\s*else\s*\{(?P<failure>[^{}]*?)\}\s*;')
-    matches = list(re.finditer(pattern, s, flags=re.MULTILINE | re.DOTALL))
+    pattern = (r'(?P<indent>^[ \t]*)let\s+(?:(?P<some>Some\s*\(\s*\w+\s*\))|(?P<plain>\w+))'
+               r'\s*=\s*common_read_dir\s*\(\s*&current_folder\s*,\s*&mut\s+warnings\s*\)')
+    matches = list(re.finditer(pattern, s, flags=re.MULTILINE))
     if len(matches) != 1:
         nearby = [x.strip()[:160] for x in s.splitlines() if 'common_read_dir(' in x and 'fn common_read_dir' not in x]
-        raise SystemExit(f'V26O_ABORT directory reading: expected one common_read_dir let-else, found {len(matches)}. Nearby calls: {nearby[:3]!r}. Source unchanged')
-    match = matches[0]
-    indent = match.group('indent')
-    var = match.group('name')
-    args = match.group('args')
-    failure = match.group('failure')
-    snippet = (f'{indent}let v26o_dir_started = v26o_stats.as_ref().map(|_| V26OInstant::now());\n'
-               f'{indent}let v26o_read_dir_result = common_read_dir({args});\n'
-               f'{indent}if let (Some(stats), Some(started)) = (v26o_stats.as_ref(), v26o_dir_started) {{\n'
-               f'{indent}    stats.read_dir_calls.fetch_add(1, V26OOrdering::Relaxed);\n'
-               f'{indent}    stats.read_dir_ns.fetch_add(v26o_time_ns(started), V26OOrdering::Relaxed);\n'
-               f'{indent}    if v26o_read_dir_result.is_none() {{\n'
-               f'{indent}        stats.read_dir_failures.fetch_add(1, V26OOrdering::Relaxed);\n'
-               f'{indent}    }}\n'
-               f'{indent}}}\n'
-               f'{indent}let Some({var}) = v26o_read_dir_result else {{{failure}}};')
-    snippet = snippet.replace('\\n', '\n')
-    s = s[:match.start()] + snippet + s[match.end():]
+        raise SystemExit(f'V26O_ABORT directory reading: expected one binding for common_read_dir, found {len(matches)}. Nearby calls: {nearby[:3]!r}. Source unchanged')
+    m = matches[0]
+    indent = m.group('indent')
+    original_expression = s[m.start()+len(indent):m.end()]
+    # Do not rewrite the existing bind/control flow. Instead, wrap the call in
+    # a small expression block. This works whether its result is bound using
+    # let-else or a regular let assignment; preserves the later error path.
+    original_binding = original_expression.split('common_read_dir', 1)[0]
+    replacement = (f'{indent}{original_binding}({{\n'
+                   f'{indent}    let v26o_read_started = v26o_stats.as_ref().map(|_| V26OInstant::now());\n'
+                   f'{indent}    let v26o_read_result = common_read_dir(&current_folder, &mut warnings);\n'
+                   f'{indent}    if let (Some(stats), Some(started)) = (v26o_stats.as_ref(), v26o_read_started) {{\n'
+                   f'{indent}        stats.read_dir_calls.fetch_add(1, V26OOrdering::Relaxed);\n'
+                   f'{indent}        stats.read_dir_ns.fetch_add(v26o_time_ns(started), V26OOrdering::Relaxed);\n'
+                   f'{indent}        if v26o_read_result.is_none() {{\n'
+                   f'{indent}            stats.read_dir_failures.fetch_add(1, V26OOrdering::Relaxed);\n'
+                   f'{indent}        }}\n'
+                   f'{indent}    }}\n'
+                   f'{indent}    v26o_read_result\n'
+                   f'{indent}}})')
+    s = s[:m.start()] + replacement + s[m.end():]
 
 # The pinned upstream tag may import AtomicBool via a grouped `use` or a
 # different order. Insert collision-proof imports without touching existing ones.
