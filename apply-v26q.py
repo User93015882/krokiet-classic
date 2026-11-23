@@ -145,8 +145,10 @@ mod v26q_native_parity {
                 let only_rust = rust_names.keys().filter(|name| !native.contains_key(*name)).count();
                 // Compare directory flags only for non-reparse entries with available file types.
                 // Windows reparse points and Rust symlinks have different type semantics.
-                let type_mismatches = native.iter().filter(|(name, &(is_dir, is_reparse))| {
-                    !is_reparse && rust_names.get(*name).is_some_and(|&(rust_dir, rust_link)| !rust_link && rust_dir != is_dir)
+                let type_mismatches = native.iter().filter(|entry| {
+                    let (name, flags) = *entry;
+                    let (is_dir, is_reparse) = *flags;
+                    !is_reparse && rust_names.get(name).is_some_and(|&(rust_dir, rust_link)| !rust_link && rust_dir != is_dir)
                 }).count();
                 log::info!(
                     "V26Q_NATIVE_PARITY native_entries={} rust_entries={} only_native={} only_rust={} type_mismatches={} rust_errors={} type_unavailable={} elapsed_ms={:.3} (opt_in; no_paths; standard_results_used)",
