@@ -109,12 +109,12 @@ def instrument_entry_file_type():
         nearby = [x.strip()[:150] for x in s.splitlines() if 'common_get_entry_data(' in x]
         raise SystemExit(f'V26O_ABORT entry retrieval: expected 1 invocation, found {len(matches)}. Nearby: {nearby[:3]!r}; source unchanged')
     m = matches[0]
-    entry_wrapped = '''{
+    entry_wrapped = '''({
                             if let Some(stats) = v26o_stats.as_ref() {
                                 stats.entries_examined.fetch_add(1, V26OOrdering::Relaxed);
                             }
                             common_get_entry_data(&entry, &mut warnings, &current_folder)
-                        }'''
+                        })'''
     s = s[:m.start()] + entry_wrapped + s[m.end():]
 
     type_pattern = r'\bentry_data\s*\.\s*file_type\s*\(\s*\)'
@@ -122,7 +122,7 @@ def instrument_entry_file_type():
     if len(matches) != 1:
         nearby = [x.strip()[:150] for x in s.splitlines() if 'file_type(' in x and 'entry_data' in x]
         raise SystemExit(f'V26O_ABORT entry file type: expected 1 invocation, found {len(matches)}. Nearby: {nearby[:3]!r}; source unchanged')
-    wrapped = '''{
+    wrapped = '''({
                             let v26o_type_started = v26o_stats.as_ref().map(|_| V26OInstant::now());
                             let v26o_type_result = entry_data.file_type();
                             if let (Some(stats), Some(started)) = (v26o_stats.as_ref(), v26o_type_started) {
@@ -133,7 +133,7 @@ def instrument_entry_file_type():
                                 }
                             }
                             v26o_type_result
-                        }'''
+                        })'''
     m = matches[0]
     s = s[:m.start()] + wrapped + s[m.end():]
 
