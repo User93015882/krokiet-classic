@@ -100,25 +100,44 @@ replace_once('        assert_ne!(self.tool_type, ToolType::None, "Tool type cann
         let v26o_stats = v26o_enabled.then(|| Arc::new(V26OTraversalStats::default()));
         let v26o_total_start = v26o_enabled.then(V26OInstant::now);''', 'activation')
 replace_directory_read()
-replace_once('''                        let Some(entry_data) = common_get_entry_data(&entry, &mut warnings, &current_folder) else {
-                            continue;
-                        };
-                        let Ok(file_type) = entry_data.file_type() else { continue };''','''                        if let Some(stats) = v26o_stats.as_ref() {
-                            stats.entries_examined.fetch_add(1, V26OOrdering::Relaxed);
-                        }
-                        let Some(entry_data) = common_get_entry_data(&entry, &mut warnings, &current_folder) else {
-                            continue;
-                        };
-                        let v26o_type_started = v26o_stats.as_ref().map(|_| V26OInstant::now());
-                        let file_type_result = entry_data.file_type();
-                        if let (Some(stats), Some(started)) = (v26o_stats.as_ref(), v26o_type_started) {
-                            stats.file_type_calls.fetch_add(1, V26OOrdering::Relaxed);
-                            stats.file_type_ns.fetch_add(v26o_time_ns(started), V26OOrdering::Relaxed);
-                            if file_type_result.is_err() {
-                                stats.file_type_failures.fetch_add(1, V26OOrdering::Relaxed);
+def instrument_entry_file_type():
+    """Wrap existing call expressions, preserving binding/control-flow style."""
+    global s
+    entry_pattern = r'\bcommon_get_entry_data\s*\(\s*&entry\s*,\s*&mut\s+warnings\s*,\s*&current_folder\s*\)'
+    matches = list(re.finditer(entry_pattern, s))
+    if len(matches) != 1:
+        nearby = [x.strip()[:150] for x in s.splitlines() if 'common_get_entry_data(' in x]
+        raise SystemExit(f'V26O_ABORT entry retrieval: expected 1 invocation, found {len(matches)}. Nearby: {nearby[:3]!r}; source unchanged')
+    m = matches[0]
+    entry_wrapped = '''{
+                            if let Some(stats) = v26o_stats.as_ref() {
+                                stats.entries_examined.fetch_add(1, V26OOrdering::Relaxed);
                             }
-                        }
-                        let Ok(file_type) = file_type_result else { continue };''','entry file type')
+                            common_get_entry_data(&entry, &mut warnings, &current_folder)
+                        }'''
+    s = s[:m.start()] + entry_wrapped + s[m.end():]
+
+    type_pattern = r'\bentry_data\s*\.\s*file_type\s*\(\s*\)'
+    matches = list(re.finditer(type_pattern, s))
+    if len(matches) != 1:
+        nearby = [x.strip()[:150] for x in s.splitlines() if 'file_type(' in x and 'entry_data' in x]
+        raise SystemExit(f'V26O_ABORT entry file type: expected 1 invocation, found {len(matches)}. Nearby: {nearby[:3]!r}; source unchanged')
+    wrapped = '''{
+                            let v26o_type_started = v26o_stats.as_ref().map(|_| V26OInstant::now());
+                            let v26o_type_result = entry_data.file_type();
+                            if let (Some(stats), Some(started)) = (v26o_stats.as_ref(), v26o_type_started) {
+                                stats.file_type_calls.fetch_add(1, V26OOrdering::Relaxed);
+                                stats.file_type_ns.fetch_add(v26o_time_ns(started), V26OOrdering::Relaxed);
+                                if v26o_type_result.is_err() {
+                                    stats.file_type_failures.fetch_add(1, V26OOrdering::Relaxed);
+                                }
+                            }
+                            v26o_type_result
+                        }'''
+    m = matches[0]
+    s = s[:m.start()] + wrapped + s[m.end():]
+
+instrument_entry_file_type()
 replace_once('''                                process_file_in_file_mode(
                                     entry_data,
                                     &mut warnings,
