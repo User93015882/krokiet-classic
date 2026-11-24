@@ -23,24 +23,24 @@ a=one(a,'    v26l_directory_queries: u64,','''    v26l_directory_queries: u64,
     v26v_query_elapsed_ns: u64,
     v26v_query_max_ns: u64,
     v26v_query_timed: u64,''','probe fields')
-a=one(a,'''                        probe.v26l_directory_queries += 1;
-                        let result = v26l_directory_ids::enumerate(parent);
-                        if result.is_err() { probe.v26l_directory_errors += 1; }''','''                        probe.v26l_directory_queries += 1;
-                        // v26V measures only the already-required directory identity call.
-                        // One timestamp pair per directory, gated by an opt-in env flag.
-                        let v26v_enabled = std::env::var_os("KROKIET_V26V_ID_TIMING")
-                            .as_deref() == Some(std::ffi::OsStr::new("1"));
-                        let v26v_start = if v26v_enabled {
-                            Some(std::time::Instant::now())
-                        } else { None };
-                        let result = v26l_directory_ids::enumerate(parent);
-                        if let Some(start) = v26v_start {
-                            let ns = start.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64;
-                            probe.v26v_query_elapsed_ns = probe.v26v_query_elapsed_ns.saturating_add(ns);
-                            probe.v26v_query_max_ns = probe.v26v_query_max_ns.max(ns);
-                            probe.v26v_query_timed = probe.v26v_query_timed.saturating_add(1);
-                        }
-                        if result.is_err() { probe.v26l_directory_errors += 1; }''','query timing anchor')
+a=one(a,'''                            probe.v26l_directory_queries += 1;
+                            let result = v26l_directory_ids::enumerate(parent);
+                            if result.is_err() { probe.v26l_directory_errors += 1; }''','''                            probe.v26l_directory_queries += 1;
+                            // Time the existing query inside the shared OnceLock initializer.
+                            // Each cache miss makes exactly one timed native call.
+                            let v26v_enabled = std::env::var_os("KROKIET_V26V_ID_TIMING")
+                                .as_deref() == Some(std::ffi::OsStr::new("1"));
+                            let v26v_start = if v26v_enabled {
+                                Some(std::time::Instant::now())
+                            } else { None };
+                            let result = v26l_directory_ids::enumerate(parent);
+                            if let Some(start) = v26v_start {
+                                let ns = start.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64;
+                                probe.v26v_query_elapsed_ns = probe.v26v_query_elapsed_ns.saturating_add(ns);
+                                probe.v26v_query_max_ns = probe.v26v_query_max_ns.max(ns);
+                                probe.v26v_query_timed = probe.v26v_query_timed.saturating_add(1);
+                            }
+                            if result.is_err() { probe.v26l_directory_errors += 1; }''','query timing anchor (v26M OnceLock)')
 b=one(b,'                let id_v26l_queries = AtomicU64::new(0);','''                let id_v26l_queries = AtomicU64::new(0);
                 let id_v26v_query_elapsed_ns = AtomicU64::new(0);
                 let id_v26v_query_max_ns = AtomicU64::new(0);
