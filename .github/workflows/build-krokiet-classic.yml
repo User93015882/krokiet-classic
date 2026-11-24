@@ -236,6 +236,10 @@ jobs:
         shell: bash
         run: python apply-v26u.py czkawka
 
+      - name: Apply v2.6V directory identity diagnostics
+        shell: bash
+        run: python apply-v26v.py czkawka
+
       - name: Test checkpoint storage
         shell: pwsh
         working-directory: czkawka
