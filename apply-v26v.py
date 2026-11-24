@@ -49,17 +49,24 @@ b=one(b,'''                            id_v26l_queries.fetch_add(identity_probe.
                             id_v26v_query_elapsed_ns.fetch_add(identity_probe.v26v_query_elapsed_ns, Ordering::Relaxed);
                             id_v26v_query_max_ns.fetch_max(identity_probe.v26v_query_max_ns, Ordering::Relaxed);
                             id_v26v_query_timed.fetch_add(identity_probe.v26v_query_timed, Ordering::Relaxed);''','aggregate timing')
-b=one(b,'''                info!("NAS_DIAG_V26L directory_identity queries={} errors={} file_hits={} per_file_fallbacks={} (per_size_group; opt_in_only; no paths or ids)",''','''                if std::env::var_os("KROKIET_V26V_ID_TIMING")
-                    .as_deref() == Some(std::ffi::OsStr::new("1")) {
-                    let timed = id_v26v_query_timed.load(Ordering::Relaxed);
-                    let total_ns = id_v26v_query_elapsed_ns.load(Ordering::Relaxed);
-                    let max_ns = id_v26v_query_max_ns.load(Ordering::Relaxed);
-                    info!("NAS_DIAG_V26V identity_call_timing timed_queries={} query_total_ms={:.3} query_mean_ms={:.3} query_max_ms={:.3} (sum_of_calls; no_paths; opt_in_only)",
-                        timed, total_ns as f64 / 1_000_000.0,
-                        if timed == 0 { 0.0 } else { (total_ns as f64 / timed as f64) / 1_000_000.0 },
-                        max_ns as f64 / 1_000_000.0);
-                }
-                info!("NAS_DIAG_V26L directory_identity queries={} errors={} file_hits={} per_file_fallbacks={} (per_size_group; opt_in_only; no paths or ids)",''','log summary')
+# Insert at the existing v26L summary, independent of its version-specific suffix.
+import re
+matches = list(re.finditer(r'(?m)^(?P<indent>[ \t]*)info!\("NAS_DIAG_V26L directory_identity queries=', b))
+if len(matches) != 1:
+    raise SystemExit(f'V26V_ABORT: v26L log summary expected once, found {len(matches)}; no files changed')
+indent = matches[0].group('indent')
+logging = '''if std::env::var_os("KROKIET_V26V_ID_TIMING")
+    .as_deref() == Some(std::ffi::OsStr::new("1")) {
+    let timed = id_v26v_query_timed.load(Ordering::Relaxed);
+    let total_ns = id_v26v_query_elapsed_ns.load(Ordering::Relaxed);
+    let max_ns = id_v26v_query_max_ns.load(Ordering::Relaxed);
+    info!("NAS_DIAG_V26V identity_call_timing timed_queries={} query_total_ms={:.3} query_mean_ms={:.3} query_max_ms={:.3} (sum_of_calls; no_paths; opt_in_only)",
+        timed, total_ns as f64 / 1_000_000.0,
+        if timed == 0 { 0.0 } else { (total_ns as f64 / timed as f64) / 1_000_000.0 },
+        max_ns as f64 / 1_000_000.0);
+}
+'''
+b = b[:matches[0].start()] + ''.join(indent + line + '\n' for line in logging.splitlines()) + b[matches[0].start():]
 # Write after both source files have passed all assertions.
 a_file.write_text(a,encoding='utf-8'); b_file.write_text(b,encoding='utf-8')
 print('V26V_OK: opt-in identity-call latency aggregation added; classification untouched')
