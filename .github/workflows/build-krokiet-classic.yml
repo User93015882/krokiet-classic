@@ -247,6 +247,7 @@ jobs:
           path: |
             czkawka/czkawka_core/src/tools/duplicate/mod.rs
             czkawka/czkawka_core/src/tools/duplicate/core.rs
+            czkawka/czkawka_core/src/common/dir_traversal.rs
           retention-days: 7
 
       - name: Test checkpoint storage
