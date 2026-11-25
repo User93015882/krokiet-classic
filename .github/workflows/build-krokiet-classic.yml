@@ -240,6 +240,15 @@ jobs:
         shell: bash
         run: python apply-v26v.py czkawka
 
+      - name: Upload patched source for v2.6W analysis
+        uses: actions/upload-artifact@v4
+        with:
+          name: krokiet-v26w-source
+          path: |
+            czkawka/czkawka_core/src/tools/duplicate/mod.rs
+            czkawka/czkawka_core/src/tools/duplicate/core.rs
+          retention-days: 7
+
       - name: Test checkpoint storage
         shell: pwsh
         working-directory: czkawka
