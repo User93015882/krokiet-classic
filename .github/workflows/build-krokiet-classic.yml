@@ -248,6 +248,10 @@ jobs:
         shell: bash
         run: python apply-v26x.py czkawka
 
+      - name: Apply v2.6Y cache cleanup diagnostic
+        shell: bash
+        run: python apply-v26y.py czkawka
+
       - name: Upload patched source for v2.6W analysis
         uses: actions/upload-artifact@v4
         with:
