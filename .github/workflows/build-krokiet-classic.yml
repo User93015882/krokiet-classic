@@ -252,6 +252,10 @@ jobs:
         shell: bash
         run: python apply-v26y.py czkawka
 
+      - name: Apply v2.6AC local checkpoint interruption diagnostic
+        shell: bash
+        run: python apply-v26ac.py czkawka
+
       - name: Upload patched source for v2.6W analysis
         uses: actions/upload-artifact@v4
         with:
